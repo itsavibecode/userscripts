@@ -6,6 +6,7 @@ every day.
 | Script | What it does |
 | --- | --- |
 | [tiktoklive](./tiktoklive) | Toggle the left navigation sidebar on TikTok LIVE pages so the video and chat get more room. |
+| [gemini-activity](./gemini-activity) | Manager panel for Gemini My Activity: load everything, then bulk-delete by date or by post with checkboxes and image/text previews. |
 
 ## Installing any script in this repo
 
