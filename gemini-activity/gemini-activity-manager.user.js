@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.2.0
+// @version      0.2.1
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -415,6 +415,29 @@
 
     /* ============================ UI ============================ */
 
+    // myactivity.google.com enforces Trusted Types CSP, which makes any
+    // `element.innerHTML = "<html>"` throw. So we build all DOM with these
+    // helpers (createElement + textContent) and never assign HTML strings.
+    function el(tag, props, kids) {
+        const e = document.createElement(tag);
+        if (props) for (const k in props) {
+            const v = props[k];
+            if (v == null) continue;
+            if (k === 'class') e.className = v;
+            else if (k === 'text') e.textContent = v;
+            else if (k === 'style') e.style.cssText = v;
+            else if (k.slice(0, 2) === 'on' && typeof v === 'function') e[k] = v;
+            else if (k.indexOf('-') === -1 && k in e) { try { e[k] = v; } catch (_) { e.setAttribute(k, v); } }
+            else e.setAttribute(k, v);
+        }
+        if (kids != null) for (const c of (Array.isArray(kids) ? kids : [kids])) {
+            if (c == null || c === false) continue;
+            e.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
+        }
+        return e;
+    }
+    function clear(node) { if (node) node.replaceChildren(); }
+
     function injectStyles() {
         if (document.getElementById('gam-styles')) return;
         const s = document.createElement('style');
@@ -473,40 +496,41 @@
 
     function buildPanel() {
         if (document.getElementById('gam-panel')) return;
-        const p = document.createElement('div');
-        p.id = 'gam-panel';
-        p.innerHTML = `
-          <div class="gam-head">
-            <h2>Gemini Activity Manager</h2>
-            <button class="gam-x" title="Close">&times;</button>
-          </div>
-          <div class="gam-bar">
-            <button class="gam-btn" data-act="loadall">Load all</button>
-            <button class="gam-btn" data-act="scan">Scan</button>
-            <button class="gam-btn" data-act="teach" title="Click one activity card to teach the script its shape">Teach a sample</button>
-            <input class="gam-search" placeholder="Filter text…">
-          </div>
-          <div class="gam-bar">
-            <button class="gam-btn" data-act="all">Select all</button>
-            <button class="gam-btn" data-act="feedback" title="Select every &quot;Gave feedback:&quot; item in the whole loaded feed">Select feedback</button>
-            <button class="gam-btn" data-act="none">Clear</button>
-            <button class="gam-btn" data-act="expand">Expand all</button>
-            <button class="gam-btn" data-act="collapse">Collapse all</button>
-          </div>
-          <div class="gam-meta" id="gam-meta">No items loaded yet. Click <b>Load all</b>, then <b>Scan</b>.</div>
-          <div class="gam-list" id="gam-list"><div class="gam-empty">Nothing scanned yet.</div></div>
-          <div class="gam-foot">
-            <div class="gam-confirm" id="gam-confirmrow" style="display:none">
-              <input type="checkbox" id="gam-understand">
-              <label for="gam-understand">I understand this permanently deletes the checked items.</label>
-            </div>
-            <div class="gam-progress" id="gam-progress"><i></i></div>
-            <div style="display:flex;gap:8px;align-items:center">
-              <button class="gam-btn danger" data-act="delete" disabled>Delete selected (0)</button>
-              <button class="gam-btn" data-act="stop" style="display:none">Stop</button>
-              <span id="gam-status" style="font-size:12px;color:#5f6368;flex:1"></span>
-            </div>
-          </div>`;
+        const mkBtn = (act, label, title) =>
+            el('button', { class: 'gam-btn', 'data-act': act, type: 'button', title: title || null }, label);
+        const p = el('div', { id: 'gam-panel' }, [
+            el('div', { class: 'gam-head' }, [
+                el('h2', { text: 'Gemini Activity Manager' }),
+                el('button', { class: 'gam-x', type: 'button', title: 'Close', onclick: closePanel }, '×'),
+            ]),
+            el('div', { class: 'gam-bar' }, [
+                mkBtn('loadall', 'Load all'),
+                mkBtn('scan', 'Scan'),
+                mkBtn('teach', 'Teach a sample', 'Click one activity card to teach the script its shape'),
+                el('input', { class: 'gam-search', placeholder: 'Filter text…' }),
+            ]),
+            el('div', { class: 'gam-bar' }, [
+                mkBtn('all', 'Select all'),
+                mkBtn('feedback', 'Select feedback', 'Select every "Gave feedback:" item in the whole loaded feed'),
+                mkBtn('none', 'Clear'),
+                mkBtn('expand', 'Expand all'),
+                mkBtn('collapse', 'Collapse all'),
+            ]),
+            el('div', { class: 'gam-meta', id: 'gam-meta' }, 'No items loaded yet. Click Load all, then Scan.'),
+            el('div', { class: 'gam-list', id: 'gam-list' }, el('div', { class: 'gam-empty' }, 'Nothing scanned yet.')),
+            el('div', { class: 'gam-foot' }, [
+                el('div', { class: 'gam-confirm', id: 'gam-confirmrow', style: 'display:none' }, [
+                    el('input', { type: 'checkbox', id: 'gam-understand' }),
+                    el('label', { 'for': 'gam-understand', text: 'I understand this permanently deletes the checked items.' }),
+                ]),
+                el('div', { class: 'gam-progress', id: 'gam-progress' }, el('i')),
+                el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
+                    el('button', { class: 'gam-btn danger', 'data-act': 'delete', type: 'button', disabled: true }, 'Delete selected (0)'),
+                    el('button', { class: 'gam-btn', 'data-act': 'stop', type: 'button', style: 'display:none' }, 'Stop'),
+                    el('span', { id: 'gam-status', style: 'font-size:12px;color:#5f6368;flex:1' }),
+                ]),
+            ]),
+        ]);
         document.body.appendChild(p);
         wirePanel(p);
         const launch = document.getElementById('gam-launch');
@@ -573,11 +597,17 @@
         // Prune selections that no longer exist.
         for (const it of [...selected]) if (!MODEL.items.includes(it)) selected.delete(it);
         const meta = document.getElementById('gam-meta');
-        if (MODEL.source === 'none') {
-            meta.innerHTML = 'No items detected. Try <b>Load all</b> first, or <b>Teach a sample</b> by clicking one activity card.';
-        } else {
-            const days = groupByDate(MODEL.items).size;
-            meta.innerHTML = `<b>${MODEL.items.length}</b> items across <b>${days}</b> date(s) · detection: ${MODEL.source}`;
+        if (meta) {
+            clear(meta);
+            if (MODEL.source === 'none') {
+                meta.textContent = 'No items detected. Try Load all first, or Teach a sample by clicking one activity card.';
+            } else {
+                const days = groupByDate(MODEL.items).size;
+                meta.append(
+                    el('b', { text: String(MODEL.items.length) }), ' items across ',
+                    el('b', { text: String(days) }), ` date(s) · detection: ${MODEL.source}`,
+                );
+            }
         }
         render();
     }
@@ -600,22 +630,23 @@
         const groups = groupByDate(items);
 
         if (!items.length) {
-            list.innerHTML = '<div class="gam-empty">No items to show. Load all → Scan.</div>';
+            clear(list);
+            list.appendChild(el('div', { class: 'gam-empty', text: 'No items to show. Load all → Scan.' }));
         } else {
             const prevCollapsed = {};
             list.querySelectorAll('.gam-group').forEach((g) => { prevCollapsed[g.dataset.date] = g.dataset.collapsed; });
-            list.innerHTML = '';
+            clear(list);
             for (const [date, arr] of groups) {
                 const g = document.createElement('div');
                 g.className = 'gam-group';
                 g.dataset.date = date;
                 g.dataset.collapsed = prevCollapsed[date] || '';
                 const allSel = arr.every((it) => selected.has(it));
-                const head = document.createElement('div');
-                head.className = 'gam-ghead';
-                head.innerHTML = `<input type="checkbox" ${allSel ? 'checked' : ''}>
-                    <span>${escapeHtml(date)}</span>
-                    <span class="gam-count">${arr.length} item(s)</span>`;
+                const head = el('div', { class: 'gam-ghead' }, [
+                    el('input', { type: 'checkbox', checked: allSel }),
+                    el('span', { text: date }),
+                    el('span', { class: 'gam-count', text: `${arr.length} item(s)` }),
+                ]);
                 const cb = head.querySelector('input');
                 cb.onclick = (ev) => {
                     ev.stopPropagation();
@@ -655,10 +686,10 @@
             row.appendChild(noImg());
         }
 
-        const tx = document.createElement('div');
-        tx.className = 'gam-rtext';
-        tx.innerHTML = `<div class="gam-desc">${escapeHtml(it.desc)}</div>
-            <div class="gam-time">${escapeHtml(it.time || '')}</div>`;
+        const tx = el('div', { class: 'gam-rtext' }, [
+            el('div', { class: 'gam-desc', text: it.desc }),
+            el('div', { class: 'gam-time', text: it.time || '' }),
+        ]);
         row.appendChild(tx);
         return row;
     }
@@ -723,11 +754,6 @@
                 render();
             },
         });
-    }
-
-    function escapeHtml(s) {
-        return String(s).replace(/[&<>"']/g, (c) =>
-            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
     /* ---------- teach / pick mode (manual fallback) ---------- */
@@ -806,7 +832,25 @@
         b.id = 'gam-launch';
         b.type = 'button';
         b.textContent = 'Activity Manager';
-        b.onclick = () => { injectStyles(); buildPanel(); doScan(); };
+        b.onclick = () => {
+            // Surface failures instead of failing silently ("button does nothing").
+            try {
+                injectStyles();
+                buildPanel();
+            } catch (err) {
+                console.error(LOG, 'panel failed to open:', err);
+                alert('Activity Manager could not open:\n' + (err && err.message ? err.message : err) +
+                      '\n\nOpen DevTools (F12) → Console and send the red error.');
+                return;
+            }
+            try {
+                doScan();
+            } catch (err) {
+                console.error(LOG, 'initial scan failed:', err);
+                const s = document.getElementById('gam-status');
+                if (s) s.textContent = 'Scan error (see console): ' + (err && err.message ? err.message : err);
+            }
+        };
         document.body.appendChild(b);
     }
 

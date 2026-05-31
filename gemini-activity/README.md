@@ -64,6 +64,12 @@ ever need tuning.
 
 ## Changelog
 
+### 0.2.1
+- Fixed the panel not opening on `myactivity.google.com` (the page enforces
+  Trusted Types CSP, which blocks `innerHTML`). All UI is now built with DOM
+  methods instead of HTML strings. The launcher button also reports errors
+  instead of failing silently.
+
 ### 0.2.0
 - Added a **Select feedback** button that selects every "Gave feedback:" item
   across the entire loaded feed in one click, for bulk deletion.
