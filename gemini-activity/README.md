@@ -64,6 +64,11 @@ ever need tuning.
 
 ## Changelog
 
+### 0.3.1
+- Deletion now explicitly clicks each card's own "✕" delete button (Gemini
+  activity cards expose one) rather than possibly hitting the "Details" link.
+- Trimmed the redundant "Gemini Apps" label off the start of each description.
+
 ### 0.3.0
 - **Load all** now reliably auto-scrolls the infinite feed: it drags the last
   loaded item into view each round and watches both the item count and page

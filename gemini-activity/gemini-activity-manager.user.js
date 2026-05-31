@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.0
+// @version      0.3.1
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -258,8 +258,10 @@
             .filter(Boolean)
             .filter((l) => !(TIME_RX.test(l) && norm(l.replace(TIME_RX_G, '')) === ''))
             .filter((l) => !isCtrlLabel(l));
+        // Drop the "Gemini Apps" product label that prefixes every card.
+        lines = lines.filter((l) => !/^gemini apps$/i.test(l));
         let desc = norm(lines.join(' — '));
-        desc = norm(desc.replace(TIME_RX_G, ' ')).replace(/^[•·—–\-\s—]+/, '').trim();
+        desc = norm(desc.replace(TIME_RX_G, ' ')).replace(/^[•·—–\-\s]+/, '').trim();
         if (desc.length > 600) desc = desc.slice(0, 597) + '…';
 
         // Thumbnail: first content-sized <img>, else a CSS background-image url.
@@ -373,16 +375,29 @@
                btns.find((b) => textHas(b, words) && !/don'?t|cancel|keep/i.test(b.textContent));
     }
 
+    // A direct per-item delete control (the "✕" in each card's top-right),
+    // identified by a delete/remove aria-label that is NOT a menu/details word.
+    function findDeleteControlIn(card) {
+        for (const c of card.querySelectorAll('button, [role="button"], a[aria-label]')) {
+            if (isVisible(c) && ariaLabelHas(c, CFG.deleteLabelWords) && !ariaLabelHas(c, CFG.menuLabelWords)) {
+                return c;
+            }
+        }
+        return null;
+    }
+
     // Delete one card by driving Google's own UI. Returns true on apparent success.
     async function deleteCard(item) {
         const card = item.el;
         if (!card || !card.isConnected) return true; // already gone
 
-        // 1. If the control itself is a direct delete button, click it.
+        // 1. Prefer the card's own ✕ delete button (Gemini activity cards have one).
         let opened = false;
-        if (item.control && ariaLabelHas(item.control, CFG.deleteLabelWords) &&
-            !ariaLabelHas(item.control, CFG.menuLabelWords)) {
-            item.control.click();
+        const directDelete = findDeleteControlIn(card) ||
+            (item.control && ariaLabelHas(item.control, CFG.deleteLabelWords) &&
+             !ariaLabelHas(item.control, CFG.menuLabelWords) ? item.control : null);
+        if (directDelete) {
+            directDelete.click();
         } else {
             // 2. Otherwise open the item's menu, then click "Delete".
             const menuBtn = item.control ||
@@ -405,8 +420,9 @@
         if (confirm) confirm.click();
         await wait(CFG.menuOpenWaitMs);
 
-        // 4. Success ≈ the card detached from the DOM.
+        // 4. Success ≈ the card detached from the DOM (give it a beat to remove).
         if (opened && document.querySelector('[role="menu"]')) document.body.click();
+        if (card.isConnected) await wait(300);
         return !card.isConnected;
     }
 
