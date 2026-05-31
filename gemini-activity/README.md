@@ -64,6 +64,14 @@ ever need tuning.
 
 ## Changelog
 
+### 0.4.0
+- Detection rewritten against the real My Activity markup: cards are now read
+  directly from their `role="listitem"` containers instead of climbing the
+  hashed-class tree. Descriptions pull the prompt cleanly (the long
+  `Gemini_Generated_Image_*` file list and "Details" link are stripped), with
+  the delete button's aria-label as a fallback for lazily-rendered cards.
+  Thumbnails now correctly use the 72px result image over the 48px Gemini icon.
+
 ### 0.3.5
 - Panel title now shows the running version (to confirm updates actually
   installed), and a **Debug** button copies a compact, privacy-conscious outline

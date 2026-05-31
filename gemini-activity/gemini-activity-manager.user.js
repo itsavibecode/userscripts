@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.5
+// @version      0.4.0
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -78,7 +78,9 @@
         deleteStepDelayMs: 650,     // pause between each item delete
         menuOpenWaitMs: 450,        // wait for a menu/dialog to render
         // An <img> counts as a content thumbnail (not an icon) above this size.
-        thumbMinPx: 28,
+        // The Gemini header icon is 48px and the result thumbnail is 72px, so 50
+        // keeps the real image and drops the icon.
+        thumbMinPx: 50,
         // The per-card header label (appears exactly once per activity card).
         // Used to bound each card reliably even when its body contains extra
         // time-like text. If absent on the page, detection falls back to times.
@@ -90,7 +92,7 @@
         viewMode: 'gam_view_mode',
     };
     const LOG = '[gemini-activity]';
-    const VERSION = '0.3.5'; // keep in sync with @version above
+    const VERSION = '0.4.0'; // keep in sync with @version above
 
     /* ============================ UTILS ============================ */
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -179,18 +181,38 @@
         return ((el.textContent || '').match(rx) || []).length;
     }
 
+    // The real activity cards: My Activity renders each as a role="listitem"
+    // (aria-label "Card showing an activity from Gemini App"). This is the stable,
+    // semantic anchor — far more reliable than climbing the hashed-class tree.
+    function activityCards() {
+        const out = [];
+        for (const li of document.querySelectorAll('[role="listitem"]')) {
+            if (li.closest('#gam-panel') || !isVisible(li)) continue;
+            const al = lc(li.getAttribute('aria-label'));
+            if (al.includes('activity') || al.includes(lc(CFG.cardLabel)) ||
+                countLabel(li) >= 1 || TIME_RX.test(li.textContent || '')) {
+                out.push(li);
+            }
+        }
+        return out;
+    }
+
     function findCards() {
-        // Prefer bounding cards by their header label (one per card) — robust even
-        // when a card's body holds extra time-like text. Fall back to timestamps.
         labelMode = countLabel(document.body) > 0;
-        const cards = new Map(); // cardEl -> delete control (found later)
+        const cards = new Map(); // cardEl -> delete control
+        // Primary path: the page's own role="listitem" cards.
+        const lis = activityCards();
+        if (lis.length) {
+            for (const li of lis) cards.set(li, findDeleteControlIn(li));
+            return cards;
+        }
+        // Fallback: climb from time anchors / ✕ controls (older heuristic) for
+        // pages/layouts that don't expose role="listitem".
         const addFrom = (startEl) => {
             const card = climbToCard(startEl);
             if (card && !cards.has(card)) cards.set(card, findDeleteControlIn(card));
         };
         for (const a of timeAnchors()) addFrom(a);
-        // Recall booster: also climb from each per-card ✕ delete control, to catch
-        // any card whose time label didn't qualify as an anchor.
         for (const c of document.querySelectorAll('button, [role="button"], a[aria-label]')) {
             if (c.closest('#gam-panel') || c.closest('#gam-launch')) continue;
             if (isVisible(c) && ariaLabelHas(c, CFG.deleteLabelWords) && !ariaLabelHas(c, CFG.menuLabelWords)) {
@@ -254,38 +276,43 @@
         }
         if (!date) date = 'Undated';
 
-        // Time: first clock match in the card.
-        const tm = (cardEl.textContent || '').match(TIME_RX);
-        const time = tm ? norm(tm[0]) : '';
+        // Time: the small footer label (e.g. "6:47 PM •"). Prefer a descendant
+        // whose own text is just a time; fall back to the first match.
+        let time = '';
+        for (const e of cardEl.querySelectorAll('div, span, time')) {
+            const t = ownText(e);
+            if (t && t.length <= 20 && TIME_RX.test(t)) { time = norm((t.match(TIME_RX) || [''])[0]); break; }
+        }
+        if (!time) { const m = (cardEl.textContent || '').match(TIME_RX); if (m) time = norm(m[0]); }
 
-        // Description: the row's rendered text, line by line, dropping noise —
-        // the "Gemini Apps" product label, the "time • Details" footer, and bare
-        // control labels. We use innerText (not a cloned/stripped subtree)
-        // because the title + prompt often live inside a clickable element, so
-        // stripping subtrees was eating the text.
+        // Description: the prompt and summary lines, with the noise removed. We
+        // strip links (the long Gemini_Generated_Image_* file list + "Details"),
+        // buttons, icons and svg, then read what's left line by line. What remains
+        // is the prompt ("Prompted …" / "Gave feedback: …") plus "Attached N
+        // file(s)" / "N generated image(s)".
         const ctrlWords = CFG.menuLabelWords.concat(CFG.deleteLabelWords);
         const isJunkLine = (l) => {
             const low = lc(l);
             if (!low) return true;
-            if (/^gemini apps$/.test(low)) return true;
-            // strip bullets + any time, then see if what's left is empty or a control word
+            if (low === lc(CFG.cardLabel)) return true; // "Gemini Apps"
             const rest = norm(low.replace(TIME_RX_G, ' ').replace(/[•·]/g, ' '));
-            if (rest === '' || ctrlWords.includes(rest)) return true;
-            return false;
+            return rest === '' || ctrlWords.includes(rest);
         };
-        let lines = (cardEl.innerText || '')
+        const clone = cardEl.cloneNode(true);
+        clone.querySelectorAll('a, button, [role="button"], svg, img, script, style').forEach((n) => n.remove());
+        let lines = (clone.innerText || clone.textContent || '')
             .split('\n')
             .map(norm)
             .filter(Boolean)
             .filter((l) => !isJunkLine(l));
         let desc = norm(lines.join(' — '));
         desc = norm(desc.replace(TIME_RX_G, ' ')).replace(/^[•·—–\-\s]+/, '').trim();
-        // Fallback: if innerText yielded nothing useful (some cards render their
-        // prompt in a way innerText skips), rebuild from raw textContent.
-        if (desc.length < 4) {
-            let t = norm(cardEl.textContent || '');
-            t = t.replace(/^gemini apps/i, '').replace(TIME_RX_G, ' ').replace(/\bdetails\b/ig, '');
-            desc = norm(t).replace(/^[•·—–\-\s]+/, '').trim();
+        // Fallback for lazily-rendered cards (no body in DOM yet): the delete
+        // button's aria-label carries the prompt, e.g. "Delete activity item # …".
+        if (desc.length < 4 && control) {
+            let al = norm(control.getAttribute('aria-label') || '');
+            al = al.replace(/^delete( all)?( activity)?( item)?( from)?\s*/i, '').replace(/[#:]\s*/, '').trim();
+            if (al && !/^today|^yesterday/i.test(al)) desc = al;
         }
         if (desc.length > 600) desc = desc.slice(0, 597) + '…';
 
@@ -351,8 +378,13 @@
         }
         return out;
     }
-    function countLoadedItems() { return timeAnchors().length; }
-    function lastItemControl() { const a = timeAnchors(); return a.length ? a[a.length - 1] : null; }
+    function countLoadedItems() { return activityCards().length || timeAnchors().length; }
+    function lastItemControl() {
+        const a = activityCards();
+        if (a.length) return a[a.length - 1];
+        const t = timeAnchors();
+        return t.length ? t[t.length - 1] : null;
+    }
 
     let scrolling = false;
     async function loadAll(onProgress) {
