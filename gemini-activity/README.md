@@ -64,6 +64,14 @@ ever need tuning.
 
 ## Changelog
 
+### 0.4.1
+- **Important safety fix.** Deletion could trigger the bulk "Delete activity by
+  [Last hour / All time]" range picker, because the confirm step fell back to
+  searching the whole page for a "Delete" button. Deletion now clicks only the
+  per-item control (matched by its "Delete activity item …" aria-label),
+  confirms only inside a per-item dialog, and **aborts immediately if the range
+  picker ever appears**. Also stops after repeated failures instead of thrashing.
+
 ### 0.4.0
 - Detection rewritten against the real My Activity markup: cards are now read
   directly from their `role="listitem"` containers instead of climbing the

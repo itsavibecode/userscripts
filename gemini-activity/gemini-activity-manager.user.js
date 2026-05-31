@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.0
+// @version      0.4.1
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -70,6 +70,13 @@
         deleteLabelWords: ['delete', 'remove'],
         // Text of the menu item / button that actually deletes.
         deleteActionWords: ['delete', 'remove'],
+        // The per-ITEM delete control's aria-label prefix. Matching this exactly
+        // avoids ever triggering the page's bulk "Delete activity by <range>"
+        // control (Last hour / Last day / All time), which would delete far more.
+        itemDeleteLabel: 'delete activity item',
+        // Phrases that identify the dangerous bulk range-picker dialog, so we can
+        // detect if we ever land on it and abort instead of confirming.
+        rangePickerPhrases: ['last hour', 'last day', 'last 4 weeks', 'all time', 'custom range'],
         // Auto-scroll tuning.
         scrollStepDelayMs: 700,     // pause between scroll nudges
         scrollStableRounds: 4,      // stop after this many rounds with no height growth
@@ -92,7 +99,7 @@
         viewMode: 'gam_view_mode',
     };
     const LOG = '[gemini-activity]';
-    const VERSION = '0.4.0'; // keep in sync with @version above
+    const VERSION = '0.4.1'; // keep in sync with @version above
 
     /* ============================ UTILS ============================ */
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -424,68 +431,80 @@
 
     /* ============================ DELETION ============================ */
 
-    function findInOpenMenu(words) {
-        const items = [...document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], li[role="option"], button')];
-        return items.filter(isVisible).find((el) => textHas(el, words));
+    function visibleDialogs() {
+        return [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(isVisible);
     }
 
-    function findConfirmButton(words) {
-        const dialogs = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(isVisible);
-        const scope = dialogs.length ? dialogs[dialogs.length - 1] : document;
-        const btns = [...scope.querySelectorAll('button, [role="button"]')].filter(isVisible);
-        // Prefer an exact "Delete" over partial matches like "Don't delete".
-        return btns.find((b) => words.includes(lc(b.textContent))) ||
-               btns.find((b) => textHas(b, words) && !/don'?t|cancel|keep/i.test(b.textContent));
-    }
-
-    // A direct per-item delete control (the "✕" in each card's top-right),
-    // identified by a delete/remove aria-label that is NOT a menu/details word.
-    function findDeleteControlIn(card) {
-        for (const c of card.querySelectorAll('button, [role="button"], a[aria-label]')) {
-            if (isVisible(c) && ariaLabelHas(c, CFG.deleteLabelWords) && !ariaLabelHas(c, CFG.menuLabelWords)) {
-                return c;
-            }
+    // The dangerous bulk "Delete activity by <range>" dialog, if open.
+    function rangePickerDialog() {
+        for (const d of visibleDialogs()) {
+            const t = lc(d.textContent);
+            if (CFG.rangePickerPhrases.some((p) => t.includes(p))) return d;
         }
         return null;
     }
 
-    // Delete one card by driving Google's own UI. Returns true on apparent success.
+    // Dismiss whatever dialog is open (Cancel button, else Escape).
+    function dismissDialog() {
+        const d = visibleDialogs().pop();
+        if (!d) return;
+        const cancel = [...d.querySelectorAll('button, [role="button"]')]
+            .find((b) => /cancel|close|keep|don'?t/i.test(b.textContent));
+        if (cancel) cancel.click();
+        else d.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+
+    // Find a confirm button INSIDE an open per-item dialog only. Never scans the
+    // whole page (that previously clicked the global Delete control by mistake),
+    // and never confirms the bulk range picker.
+    function findConfirmButton(words) {
+        const dialogs = visibleDialogs();
+        if (!dialogs.length) return null;
+        const scope = dialogs[dialogs.length - 1];
+        if (CFG.rangePickerPhrases.some((p) => lc(scope.textContent).includes(p))) return null;
+        const btns = [...scope.querySelectorAll('button, [role="button"]')].filter(isVisible);
+        return btns.find((b) => words.includes(lc(b.textContent))) ||
+               btns.find((b) => textHas(b, words) && !/don'?t|cancel|keep/i.test(b.textContent));
+    }
+
+    // The card's own per-item delete control — matched by its specific aria-label
+    // ("Delete activity item …") so we never grab the bulk/day-level Delete.
+    function findDeleteControlIn(card) {
+        if (!card) return null;
+        const cands = [...card.querySelectorAll('button, [role="button"], a[aria-label]')].filter(isVisible);
+        const specific = cands.find((c) => lc(c.getAttribute('aria-label')).includes(CFG.itemDeleteLabel));
+        if (specific) return specific;
+        // Fallback: a delete/remove control that is clearly per-item (not "all"/"by").
+        return cands.find((c) => {
+            const al = lc(c.getAttribute('aria-label'));
+            return ariaLabelHas(c, CFG.deleteLabelWords) && !ariaLabelHas(c, CFG.menuLabelWords) &&
+                   !/\ball\b|\bby\b|from today|from yesterday/.test(al);
+        }) || null;
+    }
+
+    // Delete one card by clicking ITS delete control. Returns true on success,
+    // false if we couldn't safely delete (item left checked for retry).
     async function deleteCard(item) {
         const card = item.el;
         if (!card || !card.isConnected) return true; // already gone
 
-        // 1. Prefer the card's own ✕ delete button (Gemini activity cards have one).
-        let opened = false;
-        const directDelete = findDeleteControlIn(card) ||
-            (item.control && ariaLabelHas(item.control, CFG.deleteLabelWords) &&
-             !ariaLabelHas(item.control, CFG.menuLabelWords) ? item.control : null);
-        if (directDelete) {
-            directDelete.click();
-        } else {
-            // 2. Otherwise open the item's menu, then click "Delete".
-            const menuBtn = item.control ||
-                card.querySelector('button[aria-haspopup="menu"], [aria-haspopup="true"], button, [role="button"]');
-            if (!menuBtn) return false;
-            menuBtn.click();
-            opened = true;
-            await wait(CFG.menuOpenWaitMs);
-            const del = findInOpenMenu(CFG.deleteActionWords);
-            if (!del) {
-                document.body.click(); // close stray menu
-                return false;
-            }
-            del.click();
-        }
+        const del = findDeleteControlIn(card) ||
+            (item.control && lc(item.control.getAttribute('aria-label')).includes(CFG.itemDeleteLabel)
+                ? item.control : null);
+        if (!del) return false; // no per-item control found — never guess at a global one
 
-        // 3. Confirm the dialog if one appears.
+        del.click();
         await wait(CFG.menuOpenWaitMs);
+
+        // SAFETY: if the bulk range picker opened, we hit the wrong control. Close
+        // it and abort this item without deleting anything.
+        if (rangePickerDialog()) { dismissDialog(); await wait(250); return false; }
+
+        // Confirm a per-item confirmation dialog if one appeared.
         const confirm = findConfirmButton(CFG.deleteActionWords);
-        if (confirm) confirm.click();
-        await wait(CFG.menuOpenWaitMs);
+        if (confirm) { confirm.click(); await wait(CFG.menuOpenWaitMs); }
 
-        // 4. Success ≈ the card detached from the DOM (give it a beat to remove).
-        if (opened && document.querySelector('[role="menu"]')) document.body.click();
-        if (card.isConnected) await wait(300);
+        if (card.isConnected) await wait(350);
         return !card.isConnected;
     }
 
@@ -493,15 +512,18 @@
     async function runDelete(items, hooks) {
         if (deleting) return;
         deleting = true;
-        let ok = 0, fail = 0;
+        let ok = 0, fail = 0, consecutiveFail = 0;
         try {
             for (let i = 0; i < items.length; i++) {
                 if (!deleting) break; // Stop pressed
                 hooks.onStep(i, items.length, items[i]);
                 let success = false;
                 try { success = await deleteCard(items[i]); } catch (e) { console.warn(LOG, 'delete error', e); }
-                if (success) { ok += 1; hooks.onItemDone(items[i], true); }
-                else { fail += 1; hooks.onItemDone(items[i], false); }
+                if (success) { ok += 1; consecutiveFail = 0; hooks.onItemDone(items[i], true); }
+                else { fail += 1; consecutiveFail += 1; hooks.onItemDone(items[i], false); }
+                // Safety brake: if several in a row fail, something's wrong with the
+                // delete target — stop rather than thrash (and never risk bulk delete).
+                if (consecutiveFail >= 4) { console.warn(LOG, 'stopping: 4 consecutive delete failures'); break; }
                 await wait(CFG.deleteStepDelayMs);
             }
         } finally {
