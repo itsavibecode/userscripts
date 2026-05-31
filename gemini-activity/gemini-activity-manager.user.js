@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.2.1
+// @version      0.3.0
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -142,20 +142,6 @@
         return docEl;
     }
 
-    function scrollHeightOf(root) {
-        return root === (document.scrollingElement || document.documentElement)
-            ? root.scrollHeight
-            : root.scrollHeight;
-    }
-
-    function scrollToBottom(root) {
-        if (root === (document.scrollingElement || document.documentElement)) {
-            window.scrollTo(0, document.body.scrollHeight);
-        } else {
-            root.scrollTop = root.scrollHeight;
-        }
-    }
-
     // Find a "Show more" / "Load more" button if the feed paginates by button.
     function findShowMoreButton() {
         const btns = [...document.querySelectorAll('button, [role="button"], a')];
@@ -193,22 +179,32 @@
         return cards;
     }
 
-    // From a control, walk up until we reach the smallest ancestor that also
-    // contains a clock time (the card row), but stop before we swallow siblings.
+    // How many per-item menu/delete controls live inside an element.
+    function countMenuControls(el) {
+        let n = 0;
+        for (const c of el.querySelectorAll('button, [role="button"], a[aria-label], [role="menuitem"]')) {
+            if (ariaLabelHas(c, CFG.menuLabelWords) || ariaLabelHas(c, CFG.deleteLabelWords)) n += 1;
+        }
+        return n;
+    }
+
+    // From a control, climb to the LARGEST ancestor that still represents a
+    // single item — exactly one clock time and one menu/delete control. This is
+    // the full row (icon + title + prompt + time), so we capture its text. We
+    // stop one level before an ancestor merges two items (a day group).
     function climbToCard(ctrl) {
-        let el = ctrl;
-        let depth = 0;
-        while (el && el !== document.body && depth < 10) {
-            const txt = el.textContent || '';
-            if (TIME_RX.test(txt)) {
-                // Don't over-climb into a container holding many times (a day group).
-                const times = (txt.match(TIME_RX_G) || []).length;
-                if (times <= 2) return el;
+        let el = ctrl, best = null, firstWithTime = null, depth = 0;
+        while (el && el !== document.body && depth < 12) {
+            const times = ((el.textContent || '').match(TIME_RX_G) || []).length;
+            if (times >= 1) {
+                if (!firstWithTime) firstWithTime = el;
+                if (times <= 1 && countMenuControls(el) <= 1) best = el;
+                else break; // this ancestor swallowed a second item — stop
             }
             el = el.parentElement;
             depth += 1;
         }
-        return null;
+        return best || firstWithTime;
     }
 
     // Cards derived from a user-taught sample selector (fallback path).
@@ -250,12 +246,21 @@
         const tm = (cardEl.textContent || '').match(TIME_RX);
         const time = tm ? norm(tm[0]) : '';
 
-        // Description: card text minus control labels and the time.
-        const clone = cardEl.cloneNode(true);
-        clone.querySelectorAll('button, [role="button"], svg, script, style, img').forEach((n) => n.remove());
-        let desc = norm(clone.textContent);
-        if (time) desc = norm(desc.replace(time, ''));
-        desc = desc.replace(/^[•·\-–—\s]+/, '').trim();
+        // Description: the row's rendered text, line by line, dropping the
+        // pure-time line and any control labels. We use innerText (not a
+        // cloned/stripped subtree) because the title + prompt often live inside
+        // a clickable element — stripping subtrees was eating the text.
+        const ctrlWords = CFG.menuLabelWords.concat(CFG.deleteLabelWords);
+        const isCtrlLabel = (l) => l.length <= 24 && ctrlWords.some((w) => l === w || l === w + ' options');
+        let lines = (cardEl.innerText || cardEl.textContent || '')
+            .split('\n')
+            .map(norm)
+            .filter(Boolean)
+            .filter((l) => !(TIME_RX.test(l) && norm(l.replace(TIME_RX_G, '')) === ''))
+            .filter((l) => !isCtrlLabel(l));
+        let desc = norm(lines.join(' — '));
+        desc = norm(desc.replace(TIME_RX_G, ' ')).replace(/^[•·—–\-\s—]+/, '').trim();
+        if (desc.length > 600) desc = desc.slice(0, 597) + '…';
 
         // Thumbnail: first content-sized <img>, else a CSS background-image url.
         let img = '';
@@ -298,24 +303,53 @@
 
     /* ============================ AUTO-SCROLL ============================ */
 
+    // Cheap proxy for "how many items are loaded": count visible per-item
+    // menu/delete controls. Used to detect when the infinite list stops growing.
+    function countLoadedItems() {
+        let n = 0;
+        for (const el of document.querySelectorAll('button, [role="button"], a[aria-label]')) {
+            if ((ariaLabelHas(el, CFG.menuLabelWords) || ariaLabelHas(el, CFG.deleteLabelWords)) && isVisible(el)) n += 1;
+        }
+        return n;
+    }
+
+    function lastItemControl() {
+        let last = null;
+        for (const el of document.querySelectorAll('button, [role="button"], a[aria-label]')) {
+            if ((ariaLabelHas(el, CFG.menuLabelWords) || ariaLabelHas(el, CFG.deleteLabelWords)) && isVisible(el)) last = el;
+        }
+        return last;
+    }
+
     let scrolling = false;
     async function loadAll(onProgress) {
         if (scrolling) return;
         scrolling = true;
-        const root = getScrollRoot();
-        let stable = 0;
-        let lastH = scrollHeightOf(root);
-        let rounds = 0;
+        let stable = 0, rounds = 0;
+        // Track growth by BOTH item count and document height so we don't stop
+        // early while a chunk is still loading.
+        let lastCount = countLoadedItems();
+        let lastH = document.documentElement.scrollHeight;
         try {
             while (scrolling && stable < CFG.scrollStableRounds && rounds < CFG.scrollMaxRounds) {
                 const more = findShowMoreButton();
                 if (more) more.click();
-                else scrollToBottom(root);
+                // Drag the last loaded item into view — the most reliable way to
+                // trigger lazy loading regardless of which element actually scrolls.
+                const last = lastItemControl();
+                if (last) { try { last.scrollIntoView({ block: 'end' }); } catch (e) {} }
+                window.scrollTo(0, document.documentElement.scrollHeight);
+                const root = getScrollRoot();
+                if (root && root !== document.scrollingElement && root !== document.documentElement) {
+                    root.scrollTop = root.scrollHeight;
+                }
                 await wait(CFG.scrollStepDelayMs);
                 rounds += 1;
-                const h = scrollHeightOf(root);
-                if (h > lastH + 4) { lastH = h; stable = 0; } else { stable += 1; }
-                if (onProgress) onProgress(rounds, document.querySelectorAll('button,[role="button"]').length);
+                const count = countLoadedItems();
+                const h = document.documentElement.scrollHeight;
+                if (count > lastCount || h > lastH + 4) { lastCount = Math.max(lastCount, count); lastH = Math.max(lastH, h); stable = 0; }
+                else { stable += 1; }
+                if (onProgress) onProgress(rounds, count);
             }
         } finally {
             scrolling = false;
@@ -554,12 +588,16 @@
             const act = e.target.getAttribute('data-act');
             if (!act) return;
             if (act === 'loadall') {
-                status.textContent = 'Loading…';
+                status.textContent = 'Scrolling to the bottom…';
                 e.target.disabled = true;
-                await loadAll((rounds) => { status.textContent = `Scrolling… round ${rounds}`; });
+                const stopBtn = p.querySelector('[data-act="stop"]');
+                if (stopBtn) stopBtn.style.display = '';
+                await loadAll((rounds, count) => {
+                    status.textContent = `Scrolling… ${count} items loaded (round ${rounds}) — Stop to halt`;
+                });
+                if (stopBtn) stopBtn.style.display = 'none';
                 e.target.disabled = false;
                 doScan();
-                status.textContent = 'Loaded.';
             } else if (act === 'scan') {
                 doScan();
             } else if (act === 'teach') {

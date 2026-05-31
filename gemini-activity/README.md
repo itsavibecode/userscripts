@@ -64,6 +64,16 @@ ever need tuning.
 
 ## Changelog
 
+### 0.3.0
+- **Load all** now reliably auto-scrolls the infinite feed: it drags the last
+  loaded item into view each round and watches both the item count and page
+  height, stopping only when nothing new loads. Progress shows the running item
+  count, and **Stop** halts it.
+- **Fixed empty descriptions.** Row text (title + prompt) often lives inside a
+  clickable element, which the old extraction was deleting. Descriptions now
+  come from the row's rendered text with just the time and control labels
+  removed, and each detected card now expands to the full row.
+
 ### 0.2.1
 - Fixed the panel not opening on `myactivity.google.com` (the page enforces
   Trusted Types CSP, which blocks `innerHTML`). All UI is now built with DOM
