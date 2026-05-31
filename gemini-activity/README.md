@@ -64,6 +64,11 @@ ever need tuning.
 
 ## Changelog
 
+### 0.3.5
+- Panel title now shows the running version (to confirm updates actually
+  installed), and a **Debug** button copies a compact, privacy-conscious outline
+  of the page structure for troubleshooting detection.
+
 ### 0.3.4
 - Fixed most rows showing "(no description)". Cards with long lists of generated
   files contain extra time-like text, which collapsed the old timestamp-bounded

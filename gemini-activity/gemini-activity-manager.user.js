@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.4
+// @version      0.3.5
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -90,6 +90,7 @@
         viewMode: 'gam_view_mode',
     };
     const LOG = '[gemini-activity]';
+    const VERSION = '0.3.5'; // keep in sync with @version above
 
     /* ============================ UTILS ============================ */
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -580,13 +581,14 @@
             el('button', { class: 'gam-btn', 'data-act': act, type: 'button', title: title || null }, label);
         const p = el('div', { id: 'gam-panel' }, [
             el('div', { class: 'gam-head' }, [
-                el('h2', { text: 'Gemini Activity Manager' }),
+                el('h2', { text: `Gemini Activity Manager v${VERSION}` }),
                 el('button', { class: 'gam-x', type: 'button', title: 'Close', onclick: closePanel }, '×'),
             ]),
             el('div', { class: 'gam-bar' }, [
                 mkBtn('loadall', 'Load all'),
                 mkBtn('scan', 'Scan'),
                 mkBtn('teach', 'Teach a sample', 'Click one activity card to teach the script its shape'),
+                mkBtn('debug', 'Debug', 'Copy a sample of the page structure to send for troubleshooting'),
                 el('input', { class: 'gam-search', placeholder: 'Filter text…' }),
             ]),
             el('div', { class: 'gam-bar' }, [
@@ -624,6 +626,94 @@
         if (launch) launch.style.display = '';
     }
 
+    // A compact, privacy-conscious outline of an element tree: tags + structural
+    // attributes (role/aria-label/first classes) and a short text preview. Used
+    // by the Debug button so detection can be fixed against the real markup.
+    function outline(node, depth, max) {
+        if (!node || depth > max || node.nodeType !== 1) return '';
+        const pad = '  '.repeat(depth);
+        const tag = node.tagName.toLowerCase();
+        const at = [];
+        if (node.id) at.push('#' + node.id);
+        const role = node.getAttribute && node.getAttribute('role');
+        if (role) at.push('role=' + role);
+        const al = node.getAttribute && node.getAttribute('aria-label');
+        if (al) at.push('aria-label="' + norm(al).slice(0, 40) + '"');
+        const cls = (typeof node.className === 'string') ? node.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
+        if (cls) at.push('.' + cls);
+        if (node.tagName === 'IMG') at.push('img(' + (node.naturalWidth || node.clientWidth) + 'x' + (node.naturalHeight || node.clientHeight) + ')');
+        const own = ownText(node);
+        const preview = own ? '  "' + own.slice(0, 36) + (own.length > 36 ? '…' : '') + '"' : '';
+        let out = pad + '<' + tag + (at.length ? ' ' + at.join(' ') : '') + '>' + preview + '\n';
+        const kids = [...node.children].slice(0, 12);
+        for (const k of kids) out += outline(k, depth + 1, max);
+        if (node.children.length > 12) out += '  '.repeat(depth + 1) + '… +' + (node.children.length - 12) + ' more\n';
+        return out;
+    }
+
+    function showDebug(status) {
+        // Find a region that spans a few cards (so the per-card delimiters show).
+        const anchors = timeAnchors();
+        labelMode = countLabel(document.body) > 0;
+        let region = anchors[0] || document.body;
+        let cur = region, depth = 0;
+        while (cur && cur.parentElement && cur !== document.body && depth < 20) {
+            const labels = countLabel(cur);
+            const times = ((cur.textContent || '').match(TIME_RX_G) || []).length;
+            if (labels >= 3 || times >= 3) { region = cur; break; }
+            region = cur; cur = cur.parentElement; depth += 1;
+        }
+        const summary =
+            `version: ${VERSION}\n` +
+            `labelMode (found "${CFG.cardLabel}"): ${labelMode} (count in body: ${countLabel(document.body)})\n` +
+            `time anchors: ${anchors.length}\n` +
+            `detected cards (findCards): ${findCards().size}\n` +
+            `--- structure outline of a representative region ---\n`;
+        const text = summary + outline(region, 0, 8);
+
+        // Modal with a selectable textarea + Copy.
+        const old = document.getElementById('gam-debug'); if (old) old.remove();
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.readOnly = true;
+        area.style.cssText = 'width:100%;height:340px;font:11px/1.4 monospace;white-space:pre;overflow:auto;border:1px solid #dadce0;border-radius:6px;padding:8px;';
+        const modal = document.createElement('div');
+        modal.id = 'gam-debug';
+        modal.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#fff;color:#202124;width:680px;max-width:94vw;border-radius:10px;padding:16px;box-shadow:0 8px 30px rgba(0,0,0,.4);font:14px Roboto,Arial,sans-serif;';
+        const copyBtn = el2('button', 'gam-btn primary', 'Copy to clipboard');
+        const closeBtn = el2('button', 'gam-btn', 'Close');
+        copyBtn.onclick = () => {
+            area.focus(); area.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            if (!ok && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+            copyBtn.textContent = 'Copied — paste it to Claude';
+        };
+        closeBtn.onclick = () => modal.remove();
+        const head = document.createElement('div');
+        head.style.cssText = 'font-weight:600;margin-bottom:8px;';
+        head.textContent = `Debug info (v${VERSION}) — click Copy, then paste this back to Claude`;
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'margin-top:10px;display:flex;gap:8px;';
+        btnRow.append(copyBtn, closeBtn);
+        box.append(head, area, btnRow);
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+        console.log(LOG, 'debug info:\n' + text);
+        if (status) status.textContent = 'Debug info ready — Copy and paste it to Claude.';
+    }
+
+    // Small button factory for the debug modal (avoids innerHTML).
+    function el2(tag, className, text) {
+        const e = document.createElement(tag);
+        e.type = 'button';
+        e.className = className;
+        e.textContent = text;
+        return e;
+    }
+
     function wirePanel(p) {
         p.querySelector('.gam-x').onclick = closePanel;
         const status = p.querySelector('#gam-status');
@@ -648,6 +738,8 @@
                 doScan();
             } else if (act === 'teach') {
                 enterPickMode();
+            } else if (act === 'debug') {
+                showDebug(status);
             } else if (act === 'all') {
                 visibleItems().forEach((it) => selected.add(it));
                 render();
