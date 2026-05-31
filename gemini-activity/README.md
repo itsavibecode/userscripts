@@ -64,6 +64,14 @@ ever need tuning.
 
 ## Changelog
 
+### 0.3.2
+- Rewrote detection to anchor on each card's **timestamp** instead of its
+  buttons. The old approach kept latching onto the "Details" footer link, so
+  most rows showed "Details" instead of the prompt. Now every card is found by
+  its single clock time and expanded to the full card, and Load-all measures
+  progress the same way (robust even if Google relabels the ✕ button).
+- Description cleanup now also strips the "time • Details" footer line.
+
 ### 0.3.1
 - Deletion now explicitly clicks each card's own "✕" delete button (Gemini
   activity cards expose one) rather than possibly hitting the "Details" link.

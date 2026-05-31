@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.1
+// @version      0.3.2
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -161,50 +161,32 @@
         return out;
     }
 
-    // Locate per-item menu/delete controls, then climb to the card container.
-    function findControlCards() {
-        const controls = [];
-        const all = document.querySelectorAll('button, [role="button"], [role="menuitem"], a[aria-label]');
-        for (const el of all) {
-            if (!isVisible(el)) continue;
-            if (ariaLabelHas(el, CFG.menuLabelWords) || ariaLabelHas(el, CFG.deleteLabelWords)) {
-                controls.push(el);
-            }
-        }
-        const cards = new Map(); // cardEl -> control
-        for (const ctrl of controls) {
-            const card = climbToCard(ctrl);
-            if (card && !cards.has(card)) cards.set(card, ctrl);
+    // Detect cards by anchoring on the TIMESTAMP rather than on buttons. Every
+    // activity card carries exactly one clock time, while "Details" / "✕" /
+    // "More" controls are unreliable anchors (the old approach kept landing on
+    // the "Details" footer). We find each small element that owns a time, then
+    // climb to the largest ancestor that still contains exactly one time — that
+    // is the whole card (header + prompt + attachments + footer).
+    function findCards() {
+        const cards = new Map(); // cardEl -> delete control (found later)
+        for (const a of timeAnchors()) {
+            const card = climbTimeToCard(a);
+            if (card && !cards.has(card)) cards.set(card, findDeleteControlIn(card));
         }
         return cards;
     }
 
-    // How many per-item menu/delete controls live inside an element.
-    function countMenuControls(el) {
-        let n = 0;
-        for (const c of el.querySelectorAll('button, [role="button"], a[aria-label], [role="menuitem"]')) {
-            if (ariaLabelHas(c, CFG.menuLabelWords) || ariaLabelHas(c, CFG.deleteLabelWords)) n += 1;
-        }
-        return n;
-    }
-
-    // From a control, climb to the LARGEST ancestor that still represents a
-    // single item — exactly one clock time and one menu/delete control. This is
-    // the full row (icon + title + prompt + time), so we capture its text. We
-    // stop one level before an ancestor merges two items (a day group).
-    function climbToCard(ctrl) {
-        let el = ctrl, best = null, firstWithTime = null, depth = 0;
-        while (el && el !== document.body && depth < 12) {
+    // Climb from a time element to the largest ancestor holding exactly one time.
+    function climbTimeToCard(timeEl) {
+        let el = timeEl, best = null, depth = 0;
+        while (el && el !== document.body && depth < 16) {
             const times = ((el.textContent || '').match(TIME_RX_G) || []).length;
-            if (times >= 1) {
-                if (!firstWithTime) firstWithTime = el;
-                if (times <= 1 && countMenuControls(el) <= 1) best = el;
-                else break; // this ancestor swallowed a second item — stop
-            }
+            if (times === 1) best = el;       // still a single card — keep growing
+            else if (times > 1) break;        // reached the day group — stop
             el = el.parentElement;
             depth += 1;
         }
-        return best || firstWithTime;
+        return best;
     }
 
     // Cards derived from a user-taught sample selector (fallback path).
@@ -246,20 +228,26 @@
         const tm = (cardEl.textContent || '').match(TIME_RX);
         const time = tm ? norm(tm[0]) : '';
 
-        // Description: the row's rendered text, line by line, dropping the
-        // pure-time line and any control labels. We use innerText (not a
-        // cloned/stripped subtree) because the title + prompt often live inside
-        // a clickable element — stripping subtrees was eating the text.
+        // Description: the row's rendered text, line by line, dropping noise —
+        // the "Gemini Apps" product label, the "time • Details" footer, and bare
+        // control labels. We use innerText (not a cloned/stripped subtree)
+        // because the title + prompt often live inside a clickable element, so
+        // stripping subtrees was eating the text.
         const ctrlWords = CFG.menuLabelWords.concat(CFG.deleteLabelWords);
-        const isCtrlLabel = (l) => l.length <= 24 && ctrlWords.some((w) => l === w || l === w + ' options');
+        const isJunkLine = (l) => {
+            const low = lc(l);
+            if (!low) return true;
+            if (/^gemini apps$/.test(low)) return true;
+            // strip bullets + any time, then see if what's left is empty or a control word
+            const rest = norm(low.replace(TIME_RX_G, ' ').replace(/[•·]/g, ' '));
+            if (rest === '' || ctrlWords.includes(rest)) return true;
+            return false;
+        };
         let lines = (cardEl.innerText || cardEl.textContent || '')
             .split('\n')
             .map(norm)
             .filter(Boolean)
-            .filter((l) => !(TIME_RX.test(l) && norm(l.replace(TIME_RX_G, '')) === ''))
-            .filter((l) => !isCtrlLabel(l));
-        // Drop the "Gemini Apps" product label that prefixes every card.
-        lines = lines.filter((l) => !/^gemini apps$/i.test(l));
+            .filter((l) => !isJunkLine(l));
         let desc = norm(lines.join(' — '));
         desc = norm(desc.replace(TIME_RX_G, ' ')).replace(/^[•·—–\-\s]+/, '').trim();
         if (desc.length > 600) desc = desc.slice(0, 597) + '…';
@@ -285,7 +273,7 @@
     // Full scan: detect cards (auto, then taught fallback) and parse them.
     function scan() {
         const dateHeaders = findDateHeaders();
-        let cardMap = findControlCards();
+        let cardMap = findCards();
         let source = 'auto';
         if (!cardMap.size) {
             cardMap = findTaughtCards();
@@ -305,23 +293,20 @@
 
     /* ============================ AUTO-SCROLL ============================ */
 
-    // Cheap proxy for "how many items are loaded": count visible per-item
-    // menu/delete controls. Used to detect when the infinite list stops growing.
-    function countLoadedItems() {
-        let n = 0;
-        for (const el of document.querySelectorAll('button, [role="button"], a[aria-label]')) {
-            if ((ariaLabelHas(el, CFG.menuLabelWords) || ariaLabelHas(el, CFG.deleteLabelWords)) && isVisible(el)) n += 1;
+    // Visible timestamp labels — the same anchors detection uses, so this is a
+    // reliable proxy for "how many items are loaded" regardless of button labels.
+    function timeAnchors() {
+        const out = [];
+        for (const el of document.querySelectorAll('span, div, p, time, td, li')) {
+            if (el.closest('#gam-panel') || el.closest('#gam-launch')) continue;
+            if (!isVisible(el)) continue;
+            const own = ownText(el);
+            if (own && own.length <= 28 && TIME_RX.test(own)) out.push(el);
         }
-        return n;
+        return out;
     }
-
-    function lastItemControl() {
-        let last = null;
-        for (const el of document.querySelectorAll('button, [role="button"], a[aria-label]')) {
-            if ((ariaLabelHas(el, CFG.menuLabelWords) || ariaLabelHas(el, CFG.deleteLabelWords)) && isVisible(el)) last = el;
-        }
-        return last;
-    }
+    function countLoadedItems() { return timeAnchors().length; }
+    function lastItemControl() { const a = timeAnchors(); return a.length ? a[a.length - 1] : null; }
 
     let scrolling = false;
     async function loadAll(onProgress) {
