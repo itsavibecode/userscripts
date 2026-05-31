@@ -64,6 +64,13 @@ ever need tuning.
 
 ## Changelog
 
+### 0.3.4
+- Fixed most rows showing "(no description)". Cards with long lists of generated
+  files contain extra time-like text, which collapsed the old timestamp-bounded
+  detection down to just the footer. Each card is now bounded by its "Gemini
+  Apps" header label (configurable, one per card), which is immune to that.
+  Thumbnails now pick the largest image so the result wins over the small icon.
+
 ### 0.3.3
 - Higher detection recall (also climbs from each card's ✕ control, converging
   to the same card boundary) and a `textContent` fallback so cards whose prompt

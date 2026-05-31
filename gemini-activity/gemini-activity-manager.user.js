@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.3
+// @version      0.3.4
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -79,6 +79,10 @@
         menuOpenWaitMs: 450,        // wait for a menu/dialog to render
         // An <img> counts as a content thumbnail (not an icon) above this size.
         thumbMinPx: 28,
+        // The per-card header label (appears exactly once per activity card).
+        // Used to bound each card reliably even when its body contains extra
+        // time-like text. If absent on the page, detection falls back to times.
+        cardLabel: 'Gemini Apps',
     };
 
     const LS = {
@@ -167,12 +171,20 @@
     // the "Details" footer). We find each small element that owns a time, then
     // climb to the largest ancestor that still contains exactly one time — that
     // is the whole card (header + prompt + attachments + footer).
+    // Whether the page exposes the per-card header label; decided per scan.
+    let labelMode = false;
+    function countLabel(el) {
+        const rx = new RegExp(CFG.cardLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        return ((el.textContent || '').match(rx) || []).length;
+    }
+
     function findCards() {
+        // Prefer bounding cards by their header label (one per card) — robust even
+        // when a card's body holds extra time-like text. Fall back to timestamps.
+        labelMode = countLabel(document.body) > 0;
         const cards = new Map(); // cardEl -> delete control (found later)
         const addFrom = (startEl) => {
-            const card = climbTimeToCard(startEl);
-            // Both a time label and a ✕ button climb to the SAME largest-single-time
-            // ancestor, so this de-dupes naturally by element.
+            const card = climbToCard(startEl);
             if (card && !cards.has(card)) cards.set(card, findDeleteControlIn(card));
         };
         for (const a of timeAnchors()) addFrom(a);
@@ -187,13 +199,19 @@
         return cards;
     }
 
-    // Climb from a time element to the largest ancestor holding exactly one time.
-    function climbTimeToCard(timeEl) {
-        let el = timeEl, best = null, depth = 0;
-        while (el && el !== document.body && depth < 16) {
-            const times = ((el.textContent || '').match(TIME_RX_G) || []).length;
-            if (times === 1) best = el;       // still a single card — keep growing
-            else if (times > 1) break;        // reached the day group — stop
+    // Climb from a time (or control) element to the whole card. In label mode the
+    // card is the largest ancestor containing exactly one header label; a parent
+    // with two labels is the day group, so we stop there. (Bounding by label, not
+    // by time count, is immune to cards whose body contains extra time strings.)
+    function climbToCard(startEl) {
+        let el = startEl, best = null, depth = 0;
+        while (el && el !== document.body && depth < 18) {
+            const n = labelMode
+                ? countLabel(el)
+                : ((el.textContent || '').match(TIME_RX_G) || []).length;
+            if (n === 1) best = el;        // single card — keep growing
+            else if (n >= 2) break;        // day group of cards — stop
+            // n === 0 (start element is below the header/time): keep climbing
             el = el.parentElement;
             depth += 1;
         }
@@ -270,12 +288,16 @@
         }
         if (desc.length > 600) desc = desc.slice(0, 597) + '…';
 
-        // Thumbnail: first content-sized <img>, else a CSS background-image url.
+        // Thumbnail: the LARGEST content-sized <img> (so the result image wins
+        // over the small "Gemini Apps" diamond icon), else a background-image.
         let img = '';
+        let bestArea = 0;
         for (const im of cardEl.querySelectorAll('img')) {
             const w = im.naturalWidth || im.clientWidth || parseInt(im.getAttribute('width') || '0', 10);
             const h = im.naturalHeight || im.clientHeight || parseInt(im.getAttribute('height') || '0', 10);
-            if ((w >= CFG.thumbMinPx || h >= CFG.thumbMinPx) && im.src) { img = im.src; break; }
+            if ((w >= CFG.thumbMinPx || h >= CFG.thumbMinPx) && im.src && w * h > bestArea) {
+                bestArea = w * h; img = im.src;
+            }
         }
         if (!img) {
             for (const el of cardEl.querySelectorAll('*')) {
