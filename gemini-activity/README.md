@@ -64,6 +64,12 @@ ever need tuning.
 
 ## Changelog
 
+### 0.3.3
+- Higher detection recall (also climbs from each card's ✕ control, converging
+  to the same card boundary) and a `textContent` fallback so cards whose prompt
+  text `innerText` skips still get a description. Logs any still-empty cards to
+  the console for diagnosis.
+
 ### 0.3.2
 - Rewrote detection to anchor on each card's **timestamp** instead of its
   buttons. The old approach kept latching onto the "Details" footer link, so

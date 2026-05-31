@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini My Activity — Bulk Manager
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.2
+// @version      0.3.3
 // @description  Adds a usable manager to myactivity.google.com (Gemini & other product feeds). Auto-scrolls to load every activity item, groups them by date, and gives you a checkbox panel with image + text previews so you can delete by date, by individual post, or all "Gave feedback:" posts at once — with one click. Deletions are performed by driving Google's own delete flow (open item menu, click Delete, confirm) sequentially, with a progress bar and a Stop button.
 // @author       itsavibecode
 // @match        https://myactivity.google.com/*
@@ -169,9 +169,20 @@
     // is the whole card (header + prompt + attachments + footer).
     function findCards() {
         const cards = new Map(); // cardEl -> delete control (found later)
-        for (const a of timeAnchors()) {
-            const card = climbTimeToCard(a);
+        const addFrom = (startEl) => {
+            const card = climbTimeToCard(startEl);
+            // Both a time label and a ✕ button climb to the SAME largest-single-time
+            // ancestor, so this de-dupes naturally by element.
             if (card && !cards.has(card)) cards.set(card, findDeleteControlIn(card));
+        };
+        for (const a of timeAnchors()) addFrom(a);
+        // Recall booster: also climb from each per-card ✕ delete control, to catch
+        // any card whose time label didn't qualify as an anchor.
+        for (const c of document.querySelectorAll('button, [role="button"], a[aria-label]')) {
+            if (c.closest('#gam-panel') || c.closest('#gam-launch')) continue;
+            if (isVisible(c) && ariaLabelHas(c, CFG.deleteLabelWords) && !ariaLabelHas(c, CFG.menuLabelWords)) {
+                addFrom(c);
+            }
         }
         return cards;
     }
@@ -243,13 +254,20 @@
             if (rest === '' || ctrlWords.includes(rest)) return true;
             return false;
         };
-        let lines = (cardEl.innerText || cardEl.textContent || '')
+        let lines = (cardEl.innerText || '')
             .split('\n')
             .map(norm)
             .filter(Boolean)
             .filter((l) => !isJunkLine(l));
         let desc = norm(lines.join(' — '));
         desc = norm(desc.replace(TIME_RX_G, ' ')).replace(/^[•·—–\-\s]+/, '').trim();
+        // Fallback: if innerText yielded nothing useful (some cards render their
+        // prompt in a way innerText skips), rebuild from raw textContent.
+        if (desc.length < 4) {
+            let t = norm(cardEl.textContent || '');
+            t = t.replace(/^gemini apps/i, '').replace(TIME_RX_G, ' ').replace(/\bdetails\b/ig, '');
+            desc = norm(t).replace(/^[•·—–\-\s]+/, '').trim();
+        }
         if (desc.length > 600) desc = desc.slice(0, 597) + '…';
 
         // Thumbnail: first content-sized <img>, else a CSS background-image url.
@@ -288,6 +306,11 @@
             (a.el.getBoundingClientRect().top + window.scrollY) -
             (b.el.getBoundingClientRect().top + window.scrollY));
         console.log(`${LOG} scan: ${items.length} items via "${source}", ${dateHeaders.length} date headers.`);
+        const empties = items.filter((it) => it.desc === '(no description)');
+        if (empties.length) {
+            console.warn(`${LOG} ${empties.length} item(s) had no description. First few elements:`,
+                empties.slice(0, 3).map((it) => it.el));
+        }
         return { items, dateHeaders, source };
     }
 
@@ -301,7 +324,7 @@
             if (el.closest('#gam-panel') || el.closest('#gam-launch')) continue;
             if (!isVisible(el)) continue;
             const own = ownText(el);
-            if (own && own.length <= 28 && TIME_RX.test(own)) out.push(el);
+            if (own && own.length <= 40 && TIME_RX.test(own)) out.push(el);
         }
         return out;
     }
