@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.1.0
+// @version      0.1.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -245,7 +245,10 @@
       #kac-body{padding:10px;display:flex;flex-direction:column;gap:8px}
       #kac-body.hidden{display:none}
       .kac-row{display:flex;flex-direction:column;gap:3px}
-      .kac-row label{color:#9a9aa3;font-size:11px}
+      .kac-row label{color:#9a9aa3;font-size:11px;cursor:help;display:flex;align-items:center;gap:4px}
+      .kac-q{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
+        border-radius:50%;background:#2a2a30;color:#9a9aa3;font-size:9px;font-weight:700;cursor:help}
+      #kac-status,#kac-log{cursor:help}
       .kac-row input[type=text],.kac-row input[type=number]{background:#17171c;border:1px solid #2a2a30;
         color:#e7e7ea;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
       .kac-grid{display:flex;gap:8px}
@@ -271,33 +274,42 @@
     const p = document.createElement('div');
     p.id = 'kac-panel';
     p.innerHTML = `
-      <div id="kac-head">
-        <span class="dot" id="kac-dot"></span>
+      <div id="kac-head" title="Drag this bar to move the panel. The green dot lights up while auto-sending is running.">
+        <span class="dot" id="kac-dot" title="Status light: green = running, grey = idle/stopped."></span>
         <span id="kac-title">Kick Auto-Chat</span>
-        <button id="kac-collapse" title="Collapse">_</button>
+        <button id="kac-collapse" title="Collapse / expand the panel. State is remembered.">_</button>
       </div>
       <div id="kac-body">
         <div class="kac-row">
-          <label>Message</label>
-          <input type="text" id="kac-msg" />
+          <label title="The exact text sent to chat each time. Default is Cx. Changes are saved automatically and used on the next send.">Message <span class="kac-q">?</span></label>
+          <input type="text" id="kac-msg"
+            title="The exact text sent to chat each time. Default is Cx. Changes save automatically and apply to the next send." />
         </div>
         <div class="kac-grid">
           <div class="kac-row">
-            <label>Interval (s)</label>
-            <input type="number" id="kac-int" min="1" step="1" />
+            <label title="Interval: your normal rhythm — how often the auto-loop sends, in seconds. This is the dial you'll usually use.">Interval (s) <span class="kac-q">?</span></label>
+            <input type="number" id="kac-int" min="1" step="1"
+              title="INTERVAL = normal rhythm. Send roughly every N seconds (default 65). The countdown below counts down this value after each send. If you set this lower than Cooldown, Cooldown wins." />
           </div>
           <div class="kac-row">
-            <label>Cooldown (s)</label>
-            <input type="number" id="kac-cool" min="0" step="1" />
+            <label title="Cooldown: a minimum spacing floor. The loop never sends two messages closer together than this, even if Interval is lower. Safety guard against Kick slow-mode / rate limits.">Cooldown (s) <span class="kac-q">?</span></label>
+            <input type="number" id="kac-cool" min="0" step="1"
+              title="COOLDOWN = minimum gap floor. Two auto-sends will never be closer than N seconds apart, regardless of Interval. The script waits for whichever is longer (Interval or Cooldown). Set to 0 to disable the floor. 'Send now' ignores this." />
           </div>
         </div>
-        <label class="kac-check"><input type="checkbox" id="kac-dup" /> Anti-duplicate (avoid Kick's repeat filter)</label>
+        <label class="kac-check"
+          title="Kick rejects an identical message sent twice in a row ('you already sent this message'). When on, the script appends 0-5 invisible zero-width characters that cycle each send, so repeated text like Cx still posts. Recommended ON.">
+          <input type="checkbox" id="kac-dup" /> Anti-duplicate (avoid Kick's repeat filter)</label>
         <div class="kac-btns">
-          <button class="kac-btn" id="kac-toggle">Start</button>
-          <button class="kac-btn" id="kac-now">Send now</button>
+          <button class="kac-btn" id="kac-toggle"
+            title="Start / Stop the auto-sender. While running, messages send on the Interval/Cooldown timer even if this tab is in the background (no window focus needed).">Start</button>
+          <button class="kac-btn" id="kac-now"
+            title="Send the message one time, right now. Manual override — ignores the Interval and Cooldown timers. Useful for testing that sending works.">Send now</button>
         </div>
-        <div id="kac-status"></div>
-        <div id="kac-log"></div>
+        <div id="kac-status"
+          title="Live status: shows whether it's running, the countdown to the next send, and how many messages have been sent this session."></div>
+        <div id="kac-log"
+          title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines."></div>
       </div>
     `;
     document.body.appendChild(p);
