@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.5.0
+// @version      0.5.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -17,6 +17,11 @@
 
 (function () {
   'use strict';
+
+  // Read the running version from the userscript metadata so the footer always
+  // matches the @version header (fallback string only used if GM_info is absent).
+  const VERSION =
+    (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.5.1';
 
   // ----------------------------------------------------------------------
   // Persistent settings (localStorage, per-origin)
@@ -392,6 +397,7 @@
       #kac-log{font-size:10.5px;color:#7d7d85;background:#0a0a0d;border:1px solid #1d1d22;
         border-radius:6px;padding:6px;flex:1 1 auto;min-height:64px;overflow:auto;white-space:pre-wrap}
       #kac-log .err{color:#ff7b7b}
+      #kac-foot{flex:0 0 auto;font-size:9.5px;color:#5a5a63;text-align:right;padding-right:14px;cursor:default}
       #kac-resize{position:absolute;right:2px;bottom:2px;width:15px;height:15px;cursor:nwse-resize;
         background:
           linear-gradient(135deg,transparent 0 48%,#5a5a63 48% 56%,transparent 56% 70%,#5a5a63 70% 78%,transparent 78%);
@@ -453,6 +459,8 @@
           title="Live status: shows whether it's running, the countdown to the next send, and how many messages have been sent this session."></div>
         <div id="kac-log"
           title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Drag the corner grip to make this taller."></div>
+        <div id="kac-foot"
+          title="Installed script version. Update via Tampermonkey - Check for userscript updates.">v<span id="kac-ver">?</span></div>
       </div>
       <div id="kac-resize" title="Drag to resize the panel — the log grows to fill the extra space."></div>
     `;
@@ -478,6 +486,10 @@
       log: p.querySelector('#kac-log'),
       resize: p.querySelector('#kac-resize'),
     };
+
+    // Show the running version in the footer.
+    const verEl = p.querySelector('#kac-ver');
+    if (verEl) verEl.textContent = VERSION;
 
     // Restore values
     ui.target.value = settings.targetChannel;
