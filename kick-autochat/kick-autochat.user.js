@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.1.1
+// @version      0.2.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -27,6 +27,7 @@
     intervalSec: 65,   // base time between sends
     cooldownSec: 65,   // minimum gap that MUST pass since last successful send
     antiDup: true,     // append a varying zero-width char so Kick won't reject duplicates
+    rotateKeywords: '', // comma-separated extra messages to rotate through (only used when antiDup is on)
     running: false,
     collapsed: false,
     pos: { left: null, top: null },
@@ -57,6 +58,7 @@
   let lastSendAt = 0;         // epoch ms of the last successful send
   let sendCount = 0;
   let dupCounter = 0;         // drives the anti-duplicate varying suffix
+  let rotateIndex = 0;        // position in the rotation pool
 
   // ----------------------------------------------------------------------
   // Chat input / send logic
@@ -101,11 +103,28 @@
     return r.width > 0 && r.height > 0;
   }
 
+  // Returns the list of texts currently in rotation: the main Message plus any
+  // comma-separated keywords (the keywords only count when anti-duplicate is on).
+  function rotationPool() {
+    let pool = [settings.message];
+    if (settings.antiDup && settings.rotateKeywords) {
+      const extra = settings.rotateKeywords.split(',').map(s => s.trim()).filter(Boolean);
+      pool = pool.concat(extra);
+    }
+    pool = pool.filter(s => s && s.length > 0);
+    return pool.length ? pool : [settings.message];
+  }
+
   function buildMessage() {
-    let msg = settings.message;
+    const pool = rotationPool();
+    const base = pool[rotateIndex % pool.length];
+    rotateIndex = (rotateIndex + 1) % pool.length;
+
+    let msg = base;
     if (settings.antiDup) {
       // Append N invisible zero-width spaces so Kick doesn't see an identical
-      // consecutive message. Cycles 0..5 so it never grows unbounded.
+      // consecutive message. Cycles 0..5 so it never grows unbounded. This also
+      // covers the case where two rotation entries happen to be the same word.
       dupCounter = (dupCounter + 1) % 6;
       msg += '​'.repeat(dupCounter);
     }
@@ -154,7 +173,7 @@
 
     sendCount++;
     lastSendAt = Date.now();
-    log(`Sent #${sendCount}: "${settings.message}"`);
+    log(`Sent #${sendCount}: "${text.replace(/​/g, '')}"`);
     updateStatus();
     return true;
   }
@@ -244,6 +263,7 @@
       #kac-collapse{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:14px;padding:0 2px}
       #kac-body{padding:10px;display:flex;flex-direction:column;gap:8px}
       #kac-body.hidden{display:none}
+      .kac-row.hidden{display:none}
       .kac-row{display:flex;flex-direction:column;gap:3px}
       .kac-row label{color:#9a9aa3;font-size:11px;cursor:help;display:flex;align-items:center;gap:4px}
       .kac-q{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
@@ -298,8 +318,13 @@
           </div>
         </div>
         <label class="kac-check"
-          title="Kick rejects an identical message sent twice in a row ('you already sent this message'). When on, the script appends 0-5 invisible zero-width characters that cycle each send, so repeated text like Cx still posts. Recommended ON.">
+          title="Kick rejects an identical message sent twice in a row ('you already sent this message'). When on, the script appends 0-5 invisible zero-width characters that cycle each send, so repeated text like Cx still posts, and the rotation field below becomes active. Recommended ON.">
           <input type="checkbox" id="kac-dup" /> Anti-duplicate (avoid Kick's repeat filter)</label>
+        <div class="kac-row" id="kac-rotate-row">
+          <label title="Extra messages to cycle through, separated by commas. The Message above is always first, then each keyword in turn, then it loops. Example: KEKW, LULW, Cx W. Whitespace around commas is trimmed; blank entries are ignored. Only used while Anti-duplicate is on.">Rotation keywords (comma-separated) <span class="kac-q">?</span></label>
+          <input type="text" id="kac-rotate" placeholder="e.g. KEKW, LULW, Cx W"
+            title="Comma-separated list of additional messages. Sends cycle: Message, then each keyword, then loop. Leave empty to just send the Message. Only active while Anti-duplicate is checked." />
+        </div>
         <div class="kac-btns">
           <button class="kac-btn" id="kac-toggle"
             title="Start / Stop the auto-sender. While running, messages send on the Interval/Cooldown timer even if this tab is in the background (no window focus needed).">Start</button>
@@ -324,6 +349,8 @@
       int: p.querySelector('#kac-int'),
       cool: p.querySelector('#kac-cool'),
       dup: p.querySelector('#kac-dup'),
+      rotate: p.querySelector('#kac-rotate'),
+      rotateRow: p.querySelector('#kac-rotate-row'),
       toggle: p.querySelector('#kac-toggle'),
       now: p.querySelector('#kac-now'),
       status: p.querySelector('#kac-status'),
@@ -335,6 +362,8 @@
     ui.int.value = settings.intervalSec;
     ui.cool.value = settings.cooldownSec;
     ui.dup.checked = settings.antiDup;
+    ui.rotate.value = settings.rotateKeywords;
+    ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
     if (settings.pos.left != null) {
       p.style.left = settings.pos.left + 'px';
       p.style.top = settings.pos.top + 'px';
@@ -352,7 +381,17 @@
       settings.cooldownSec = Math.max(0, parseInt(ui.cool.value, 10) || 0); saveSettings();
       if (settings.running) scheduleNext();
     });
-    ui.dup.addEventListener('change', () => { settings.antiDup = ui.dup.checked; saveSettings(); });
+    ui.dup.addEventListener('change', () => {
+      settings.antiDup = ui.dup.checked;
+      ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
+      rotateIndex = 0;
+      saveSettings();
+    });
+    ui.rotate.addEventListener('input', () => {
+      settings.rotateKeywords = ui.rotate.value;
+      rotateIndex = 0; // restart the cycle when the list changes
+      saveSettings();
+    });
     ui.toggle.addEventListener('click', () => settings.running ? stop() : start());
     ui.now.addEventListener('click', sendNow);
     ui.collapse.addEventListener('click', () => {
