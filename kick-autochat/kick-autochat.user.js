@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.0
+// @version      0.4.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -327,7 +327,7 @@
         background:linear-gradient(90deg,#1b2f1b,#13131a);border-bottom:1px solid #2a2a30}
       #kac-head .dot{width:8px;height:8px;border-radius:50%;background:#666;flex:0 0 auto}
       #kac-head .dot.on{background:#53fc18;box-shadow:0 0 8px #53fc18}
-      #kac-title{font-weight:700;letter-spacing:.3px;flex:1}
+      #kac-title{font-weight:700;letter-spacing:.3px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       #kac-collapse{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:14px;padding:0 2px}
       #kac-body{padding:10px;display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0;overflow:hidden}
       #kac-body.hidden{display:none}
@@ -416,6 +416,7 @@
     ui = {
       panel: p,
       head: p.querySelector('#kac-head'),
+      titleEl: p.querySelector('#kac-title'),
       dot: p.querySelector('#kac-dot'),
       collapse: p.querySelector('#kac-collapse'),
       body: p.querySelector('#kac-body'),
@@ -474,6 +475,7 @@
       settings.collapsed = !settings.collapsed;
       ui.body.classList.toggle('hidden', settings.collapsed);
       applySize();
+      updateStatus();
       saveSettings();
     });
 
@@ -564,8 +566,15 @@
     if (settings.running) {
       const secs = Math.max(0, Math.ceil((nextSendAt - Date.now()) / 1000));
       ui.status.innerHTML = `Running — next in <b>${secs}s</b> · sent ${sendCount}`;
+      // Mirror into the title bar so it's visible even when collapsed.
+      ui.titleEl.textContent = settings.collapsed
+        ? `${secs}s · ${sendCount} sent`
+        : `Kick Auto-Chat · ${secs}s · ${sendCount} sent`;
     } else {
       ui.status.innerHTML = `Idle · sent ${sendCount}`;
+      ui.titleEl.textContent = settings.collapsed
+        ? `Idle · ${sendCount} sent`
+        : 'Kick Auto-Chat';
     }
   }
 
