@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.5.1
+// @version      0.5.2
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -584,6 +584,9 @@
     const p = ui.panel;
     p.style.width = settings.size.w ? settings.size.w + 'px' : '';
     p.style.height = (settings.size.h && !settings.collapsed) ? settings.size.h + 'px' : '';
+    // The resize grip only makes sense when expanded — hide it when collapsed
+    // so it can't be dragged into blank space.
+    if (ui.resize) ui.resize.style.display = settings.collapsed ? 'none' : '';
   }
 
   function makeResizable(panel, handle) {
