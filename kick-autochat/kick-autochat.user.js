@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.1
+// @version      0.5.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -23,6 +23,7 @@
   // ----------------------------------------------------------------------
   const STORE_KEY = 'kick-autochat:settings';
   const DEFAULTS = {
+    targetChannel: 'iceposeidon', // only sends on kick.com/<this>; paused everywhere else
     message: 'Cx',
     intervalSec: 65,   // base time between sends
     cooldownSec: 65,   // minimum gap that MUST pass since last successful send
@@ -104,6 +105,37 @@
     return r.width > 0 && r.height > 0;
   }
 
+  // ----------------------------------------------------------------------
+  // Target-channel gating. The panel shows on every kick.com page, but sends
+  // only happen on the configured channel — so navigating to another streamer
+  // (in this tab or another) never posts there.
+  // ----------------------------------------------------------------------
+
+  // Normalize whatever the user typed (username, @handle, or a full kick URL)
+  // down to a bare lowercase channel slug.
+  function normChannel(v) {
+    if (!v) return '';
+    v = String(v).trim();
+    const m = v.match(/kick\.com\/([^/?#]+)/i);
+    if (m) v = m[1];
+    return v.replace(/^@+/, '').replace(/[/?#].*$/, '').trim().toLowerCase();
+  }
+
+  // The channel slug of the page we're currently on (first path segment).
+  function currentChannel() {
+    const seg = location.pathname.split('/').filter(Boolean)[0] || '';
+    return seg.toLowerCase();
+  }
+
+  function targetChannel() {
+    return normChannel(settings.targetChannel);
+  }
+
+  function isOnTarget() {
+    const t = targetChannel();
+    return !!t && currentChannel() === t;
+  }
+
   // Returns the list of texts currently in rotation: the main Message plus any
   // comma-separated keywords (the keywords only count when anti-duplicate is on).
   function rotationPool() {
@@ -135,6 +167,8 @@
   // Insert text into a contenteditable (Lexical/ProseMirror friendly) or a
   // textarea, then submit. Returns true if a send was attempted.
   function sendMessage() {
+    // Hard safety net: never post unless we're on the target channel.
+    if (!isOnTarget()) return false;
     const input = findInput();
     if (!input) {
       log('Chat input not found — is chat loaded / are you logged in?', true);
@@ -277,7 +311,9 @@
   function tick() {
     if (!settings.running) return;
     const now = Date.now();
-    if (now >= nextSendAt) {
+    if (now >= nextSendAt && isOnTarget()) {
+      // Off-target ticks are skipped WITHOUT rescheduling, so the moment you
+      // return to the target channel it sends right away, then resumes timing.
       sendMessage();
       scheduleNext();
     }
@@ -306,6 +342,10 @@
   }
 
   function sendNow() {
+    if (!isOnTarget()) {
+      log(`Blocked — not on @${targetChannel() || '(unset)'} (here: @${currentChannel() || '—'})`, true);
+      return;
+    }
     sendMessage();
     if (settings.running) scheduleNext();
     updateStatus();
@@ -374,6 +414,11 @@
       </div>
       <div id="kac-body">
         <div class="kac-row">
+          <label title="The bot ONLY sends on kick.com/<this username>. On any other channel or tab it shows Paused and posts nothing. You can type a username, an @handle, or paste a full kick.com URL.">Target channel <span class="kac-q">?</span></label>
+          <input type="text" id="kac-target" placeholder="iceposeidon"
+            title="Only auto-send on this Kick channel. Example: iceposeidon. Navigate to a different streamer and the bot pauses automatically — it will not chat there." />
+        </div>
+        <div class="kac-row">
           <label title="The exact text sent to chat each time. Default is Cx. Changes are saved automatically and used on the next send.">Message <span class="kac-q">?</span></label>
           <input type="text" id="kac-msg"
             title="The exact text sent to chat each time. Default is Cx. Changes save automatically and apply to the next send." />
@@ -420,6 +465,7 @@
       dot: p.querySelector('#kac-dot'),
       collapse: p.querySelector('#kac-collapse'),
       body: p.querySelector('#kac-body'),
+      target: p.querySelector('#kac-target'),
       msg: p.querySelector('#kac-msg'),
       int: p.querySelector('#kac-int'),
       cool: p.querySelector('#kac-cool'),
@@ -434,6 +480,7 @@
     };
 
     // Restore values
+    ui.target.value = settings.targetChannel;
     ui.msg.value = settings.message;
     ui.int.value = settings.intervalSec;
     ui.cool.value = settings.cooldownSec;
@@ -449,6 +496,11 @@
     applySize();
 
     // Wire events
+    ui.target.addEventListener('input', () => {
+      settings.targetChannel = ui.target.value;
+      saveSettings();
+      updateStatus();
+    });
     ui.msg.addEventListener('input', () => { settings.message = ui.msg.value; saveSettings(); });
     ui.int.addEventListener('input', () => {
       settings.intervalSec = Math.max(1, parseInt(ui.int.value, 10) || 1); saveSettings();
@@ -563,15 +615,26 @@
 
   function updateStatus() {
     if (!ui.status) return;
+    const target = targetChannel() || '(unset)';
+
+    // Running but on the wrong channel → paused, nothing is sent here.
+    if (settings.running && !isOnTarget()) {
+      ui.status.innerHTML = `Paused — not on <b>@${target}</b> (here: @${currentChannel() || '—'})`;
+      ui.titleEl.textContent = settings.collapsed
+        ? `Paused @${target}`
+        : `Kick Auto-Chat · paused`;
+      return;
+    }
+
     if (settings.running) {
       const secs = Math.max(0, Math.ceil((nextSendAt - Date.now()) / 1000));
-      ui.status.innerHTML = `Running — next in <b>${secs}s</b> · sent ${sendCount}`;
+      ui.status.innerHTML = `Running on <b>@${target}</b> — next in <b>${secs}s</b> · sent ${sendCount}`;
       // Mirror into the title bar so it's visible even when collapsed.
       ui.titleEl.textContent = settings.collapsed
         ? `${secs}s · ${sendCount} sent`
         : `Kick Auto-Chat · ${secs}s · ${sendCount} sent`;
     } else {
-      ui.status.innerHTML = `Idle · sent ${sendCount}`;
+      ui.status.innerHTML = `Idle · target @${target} · sent ${sendCount}`;
       ui.titleEl.textContent = settings.collapsed
         ? `Idle · ${sendCount} sent`
         : 'Kick Auto-Chat';
