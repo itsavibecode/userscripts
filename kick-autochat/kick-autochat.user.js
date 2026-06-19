@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.2.0
+// @version      0.3.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -175,6 +175,7 @@
     lastSendAt = Date.now();
     log(`Sent #${sendCount}: "${text.replace(/​/g, '')}"`);
     updateStatus();
+    checkWaitAfterSend();
     return true;
   }
 
@@ -194,6 +195,71 @@
     el.dispatchEvent(new KeyboardEvent('keydown', opts));
     el.dispatchEvent(new KeyboardEvent('keypress', opts));
     el.dispatchEvent(new KeyboardEvent('keyup', opts));
+  }
+
+  // ----------------------------------------------------------------------
+  // Slow-mode / rate-limit detection.
+  // After a send, Kick may refuse it and show a notice like
+  // "Wait 5 seconds before sending another message" (slow mode), or a generic
+  // "you are sending messages too quickly". We scan short notice elements near
+  // the chat box for that text, log it in the GUI, and delay the next send.
+  // ----------------------------------------------------------------------
+  const WAIT_RE = /\bwait\s+(\d+(?:\.\d+)?)\s*second/i;
+  const SLOW_RE = /(slow ?mode|sending (?:messages )?too (?:fast|quickly)|too many messages)/i;
+  let lastWaitNotice = { text: '', at: 0 };
+
+  function scanForWaitNotice() {
+    const texts = [];
+    const push = (t) => { if (t && t.length > 0 && t.length < 200) texts.push(t); };
+
+    const input = findInput();
+    if (input) {
+      push(input.getAttribute('placeholder'));
+      // The footer/form wrapping the input is where Kick usually drops the notice.
+      const wrap = input.closest('form') || input.parentElement;
+      if (wrap) push(wrap.textContent);
+    }
+
+    const btn = findSendButton();
+    if (btn) { push(btn.textContent); push(btn.getAttribute('aria-label')); }
+
+    // Generic notice/toast/error containers (class match is case-insensitive).
+    const sel = '[role="alert"], [class*="error" i], [class*="toast" i], ' +
+                '[class*="notif" i], [class*="warn" i], [class*="slow" i]';
+    document.querySelectorAll(sel).forEach((el) => push(el.textContent));
+
+    for (const raw of texts) {
+      const t = raw.replace(/\s+/g, ' ').trim();
+      const m = t.match(WAIT_RE);
+      if (m) return { text: t.slice(0, 120), secs: parseFloat(m[1]) };
+      if (SLOW_RE.test(t)) return { text: t.slice(0, 120), secs: null };
+    }
+    return null;
+  }
+
+  function handleWaitNotice(n) {
+    const now = Date.now();
+    // Debounce: don't log the same notice repeatedly within 5s.
+    if (n.text === lastWaitNotice.text && now - lastWaitNotice.at < 5000) return;
+    lastWaitNotice = { text: n.text, at: now };
+
+    if (n.secs != null) {
+      log(`Kick slow-mode: "${n.text}" — delaying next send ${n.secs}s`, true);
+      if (settings.running) {
+        nextSendAt = Math.max(nextSendAt, now + n.secs * 1000 + 500);
+        updateStatus();
+      }
+    } else {
+      log(`Kick blocked the send: "${n.text}"`, true);
+    }
+  }
+
+  // Poll a few times after a send, since the notice may appear with a slight lag.
+  function checkWaitAfterSend() {
+    [150, 450, 900, 1600].forEach((d) => setTimeout(() => {
+      const n = scanForWaitNotice();
+      if (n) handleWaitNotice(n);
+    }, d));
   }
 
   // ----------------------------------------------------------------------
