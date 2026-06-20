@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.5.2
+// @version      0.6.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -32,6 +32,9 @@
     message: 'Cx',
     intervalSec: 65,   // base time between sends
     cooldownSec: 65,   // minimum gap that MUST pass since last successful send
+    randomize: false,      // pick interval/cooldown randomly between min and max each cycle
+    intervalMaxSec: 90,    // upper bound for interval when randomize is on (min = intervalSec)
+    cooldownMaxSec: 90,    // upper bound for cooldown when randomize is on (min = cooldownSec)
     antiDup: true,     // append a varying zero-width char so Kick won't reject duplicates
     rotateKeywords: '', // comma-separated extra messages to rotate through (only used when antiDup is on)
     running: false,
@@ -305,11 +308,22 @@
   // ----------------------------------------------------------------------
   // Scheduler  (1s tick so the UI countdown stays live and timing is exact)
   // ----------------------------------------------------------------------
+  // Pick a value for this cycle: the fixed min, or a random whole number in
+  // [min, max] when randomize is on (order-safe if max < min).
+  function pickSeconds(minV, maxV) {
+    if (!settings.randomize) return minV;
+    const lo = Math.min(minV, maxV);
+    const hi = Math.max(minV, maxV);
+    return lo + Math.floor(Math.random() * (hi - lo + 1));
+  }
+
   function scheduleNext() {
     const now = Date.now();
+    const iv = pickSeconds(settings.intervalSec, settings.intervalMaxSec);
+    const cd = pickSeconds(settings.cooldownSec, settings.cooldownMaxSec);
     // Next send respects BOTH the interval and the minimum cooldown gap.
-    const byInterval = now + settings.intervalSec * 1000;
-    const byCooldown = lastSendAt + settings.cooldownSec * 1000;
+    const byInterval = now + iv * 1000;
+    const byCooldown = lastSendAt + cd * 1000;
     nextSendAt = Math.max(byInterval, byCooldown);
   }
 
@@ -431,14 +445,29 @@
         </div>
         <div class="kac-grid">
           <div class="kac-row">
-            <label title="Interval: your normal rhythm — how often the auto-loop sends, in seconds. This is the dial you'll usually use.">Interval (s) <span class="kac-q">?</span></label>
+            <label title="Interval: your normal rhythm — how often the auto-loop sends, in seconds. With Randomize on, this is the LOW end of the range."><span id="kac-int-lbl">Interval (s)</span> <span class="kac-q">?</span></label>
             <input type="number" id="kac-int" min="1" step="1"
-              title="INTERVAL = normal rhythm. Send roughly every N seconds (default 65). The countdown below counts down this value after each send. If you set this lower than Cooldown, Cooldown wins." />
+              title="INTERVAL = normal rhythm. Send roughly every N seconds (default 65). With Randomize on this is the minimum and 'Interval max' is the maximum. If lower than Cooldown, Cooldown wins." />
           </div>
           <div class="kac-row">
-            <label title="Cooldown: a minimum spacing floor. The loop never sends two messages closer together than this, even if Interval is lower. Safety guard against Kick slow-mode / rate limits.">Cooldown (s) <span class="kac-q">?</span></label>
+            <label title="Cooldown: a minimum spacing floor. With Randomize on, this is the LOW end of the cooldown range."><span id="kac-cool-lbl">Cooldown (s)</span> <span class="kac-q">?</span></label>
             <input type="number" id="kac-cool" min="0" step="1"
-              title="COOLDOWN = minimum gap floor. Two auto-sends will never be closer than N seconds apart, regardless of Interval. The script waits for whichever is longer (Interval or Cooldown). Set to 0 to disable the floor. 'Send now' ignores this." />
+              title="COOLDOWN = minimum gap floor. Two auto-sends never land closer than this. With Randomize on this is the minimum and 'Cooldown max' is the maximum. The script waits for whichever is longer (interval or cooldown). 'Send now' ignores it." />
+          </div>
+        </div>
+        <label class="kac-check"
+          title="When on, each send waits a RANDOM whole number of seconds between the min (Interval/Cooldown) and the max values below, re-rolled every cycle. Makes timing look less robotic.">
+          <input type="checkbox" id="kac-rand" /> Randomize timing (between min &amp; max)</label>
+        <div class="kac-grid" id="kac-rand-row">
+          <div class="kac-row">
+            <label title="Upper bound for the random interval, in seconds. Only used when Randomize is on.">Interval max (s) <span class="kac-q">?</span></label>
+            <input type="number" id="kac-int-max" min="1" step="1"
+              title="Max interval when Randomize is on. Each cycle picks a random whole number of seconds between Interval and this value." />
+          </div>
+          <div class="kac-row">
+            <label title="Upper bound for the random cooldown, in seconds. Only used when Randomize is on.">Cooldown max (s) <span class="kac-q">?</span></label>
+            <input type="number" id="kac-cool-max" min="0" step="1"
+              title="Max cooldown when Randomize is on. Each cycle picks a random whole number of seconds between Cooldown and this value." />
           </div>
         </div>
         <label class="kac-check"
@@ -477,6 +506,12 @@
       msg: p.querySelector('#kac-msg'),
       int: p.querySelector('#kac-int'),
       cool: p.querySelector('#kac-cool'),
+      rand: p.querySelector('#kac-rand'),
+      randRow: p.querySelector('#kac-rand-row'),
+      intMax: p.querySelector('#kac-int-max'),
+      coolMax: p.querySelector('#kac-cool-max'),
+      intLbl: p.querySelector('#kac-int-lbl'),
+      coolLbl: p.querySelector('#kac-cool-lbl'),
       dup: p.querySelector('#kac-dup'),
       rotate: p.querySelector('#kac-rotate'),
       rotateRow: p.querySelector('#kac-rotate-row'),
@@ -496,6 +531,11 @@
     ui.msg.value = settings.message;
     ui.int.value = settings.intervalSec;
     ui.cool.value = settings.cooldownSec;
+    ui.rand.checked = settings.randomize;
+    ui.intMax.value = settings.intervalMaxSec;
+    ui.coolMax.value = settings.cooldownMaxSec;
+    ui.randRow.classList.toggle('hidden', !settings.randomize);
+    updateRandLabels();
     ui.dup.checked = settings.antiDup;
     ui.rotate.value = settings.rotateKeywords;
     ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
@@ -520,6 +560,21 @@
     });
     ui.cool.addEventListener('input', () => {
       settings.cooldownSec = Math.max(0, parseInt(ui.cool.value, 10) || 0); saveSettings();
+      if (settings.running) scheduleNext();
+    });
+    ui.rand.addEventListener('change', () => {
+      settings.randomize = ui.rand.checked;
+      ui.randRow.classList.toggle('hidden', !settings.randomize);
+      updateRandLabels();
+      saveSettings();
+      if (settings.running) scheduleNext();
+    });
+    ui.intMax.addEventListener('input', () => {
+      settings.intervalMaxSec = Math.max(1, parseInt(ui.intMax.value, 10) || 1); saveSettings();
+      if (settings.running) scheduleNext();
+    });
+    ui.coolMax.addEventListener('input', () => {
+      settings.cooldownMaxSec = Math.max(0, parseInt(ui.coolMax.value, 10) || 0); saveSettings();
       if (settings.running) scheduleNext();
     });
     ui.dup.addEventListener('change', () => {
@@ -621,6 +676,11 @@
     });
   }
 
+  function updateRandLabels() {
+    if (ui.intLbl) ui.intLbl.textContent = settings.randomize ? 'Interval min (s)' : 'Interval (s)';
+    if (ui.coolLbl) ui.coolLbl.textContent = settings.randomize ? 'Cooldown min (s)' : 'Cooldown (s)';
+  }
+
   function syncControls() {
     if (!ui.toggle) return;
     ui.toggle.textContent = settings.running ? 'Stop' : 'Start';
@@ -643,7 +703,7 @@
 
     if (settings.running) {
       const secs = Math.max(0, Math.ceil((nextSendAt - Date.now()) / 1000));
-      ui.status.innerHTML = `Running on <b>@${target}</b> — next in <b>${secs}s</b> · sent ${sendCount}`;
+      ui.status.innerHTML = `Running on <b>@${target}</b> — next in <b>${secs}s</b> · sent ${sendCount}${settings.randomize ? ' · rand' : ''}`;
       // Mirror into the title bar so it's visible even when collapsed.
       ui.titleEl.textContent = settings.collapsed
         ? `${secs}s · ${sendCount} sent`
