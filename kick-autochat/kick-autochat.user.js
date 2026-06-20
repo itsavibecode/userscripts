@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.6.0
+// @version      0.6.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -68,7 +68,8 @@
   let lastSendAt = 0;         // epoch ms of the last successful send
   let sendCount = 0;
   let dupCounter = 0;         // drives the anti-duplicate varying suffix
-  let rotateIndex = 0;        // position in the rotation pool
+  let rotateIndex = 0;        // position in the rotation pool (sequential mode)
+  let lastBase = null;        // last text sent, so random mode never repeats it back-to-back
 
   // ----------------------------------------------------------------------
   // Chat input / send logic
@@ -153,13 +154,28 @@
       pool = pool.concat(extra);
     }
     pool = pool.filter(s => s && s.length > 0);
+    // De-duplicate exact repeats so random selection is fair and two identical
+    // entries can't cause a back-to-back repeat.
+    pool = [...new Set(pool)];
     return pool.length ? pool : [settings.message];
   }
 
   function buildMessage() {
     const pool = rotationPool();
-    const base = pool[rotateIndex % pool.length];
-    rotateIndex = (rotateIndex + 1) % pool.length;
+    let base;
+    if (settings.randomize && pool.length > 1) {
+      // Random order, but never the same text twice in a row (more human).
+      let attempts = 0;
+      do {
+        base = pool[Math.floor(Math.random() * pool.length)];
+        attempts++;
+      } while (base === lastBase && attempts < 12);
+    } else {
+      // Fixed rotation: step through the pool in order.
+      base = pool[rotateIndex % pool.length];
+      rotateIndex = (rotateIndex + 1) % pool.length;
+    }
+    lastBase = base;
 
     let msg = base;
     if (settings.antiDup) {
@@ -456,8 +472,8 @@
           </div>
         </div>
         <label class="kac-check"
-          title="When on, each send waits a RANDOM whole number of seconds between the min (Interval/Cooldown) and the max values below, re-rolled every cycle. Makes timing look less robotic.">
-          <input type="checkbox" id="kac-rand" /> Randomize timing (between min &amp; max)</label>
+          title="When on: (1) each send waits a RANDOM whole number of seconds between the min (Interval/Cooldown) and the max values below, re-rolled every cycle; and (2) rotation keywords are sent in RANDOM order, never the same one twice in a row. Makes the bot look less robotic.">
+          <input type="checkbox" id="kac-rand" /> Randomize timing &amp; keyword order</label>
         <div class="kac-grid" id="kac-rand-row">
           <div class="kac-row">
             <label title="Upper bound for the random interval, in seconds. Only used when Randomize is on.">Interval max (s) <span class="kac-q">?</span></label>
