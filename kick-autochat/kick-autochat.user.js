@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.6.1
+// @version      0.6.2
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -30,11 +30,11 @@
   const DEFAULTS = {
     targetChannel: 'iceposeidon', // only sends on kick.com/<this>; paused everywhere else
     message: 'Cx',
-    intervalSec: 65,   // base time between sends
-    cooldownSec: 65,   // minimum gap that MUST pass since last successful send
-    randomize: false,      // pick interval/cooldown randomly between min and max each cycle
-    intervalMaxSec: 90,    // upper bound for interval when randomize is on (min = intervalSec)
-    cooldownMaxSec: 90,    // upper bound for cooldown when randomize is on (min = cooldownSec)
+    intervalSec: 110,  // base/min time between sends
+    cooldownSec: 4,    // minimum gap that MUST pass since last successful send
+    randomize: true,       // pick interval/cooldown randomly between min and max each cycle
+    intervalMaxSec: 119,   // upper bound for interval when randomize is on (min = intervalSec)
+    cooldownMaxSec: 19,    // upper bound for cooldown when randomize is on (min = cooldownSec)
     antiDup: true,     // append a varying zero-width char so Kick won't reject duplicates
     rotateKeywords: '', // comma-separated extra messages to rotate through (only used when antiDup is on)
     running: false,
