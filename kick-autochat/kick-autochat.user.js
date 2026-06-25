@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.6.2
+// @version      0.7.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -37,6 +37,10 @@
     cooldownMaxSec: 19,    // upper bound for cooldown when randomize is on (min = cooldownSec)
     antiDup: true,     // append a varying zero-width char so Kick won't reject duplicates
     rotateKeywords: '', // comma-separated extra messages to rotate through (only used when antiDup is on)
+    secondEnabled: true,    // a second message on its own long timer (e.g. !claim)
+    secondMessage: '!claim',// sent verbatim, no rotation/anti-dup
+    secondValue: 4,         // how often (number)
+    secondUnit: 'hours',    // 'minutes' | 'hours'
     running: false,
     collapsed: false,
     pos: { left: null, top: null },
@@ -67,6 +71,8 @@
   let nextSendAt = 0;         // epoch ms of the next scheduled send
   let lastSendAt = 0;         // epoch ms of the last successful send
   let sendCount = 0;
+  let secondNextSendAt = 0;   // epoch ms of the next scheduled (second) send
+  let secondCount = 0;
   let dupCounter = 0;         // drives the anti-duplicate varying suffix
   let rotateIndex = 0;        // position in the rotation pool (sequential mode)
   let lastBase = null;        // last text sent, so random mode never repeats it back-to-back
@@ -188,9 +194,10 @@
     return msg;
   }
 
-  // Insert text into a contenteditable (Lexical/ProseMirror friendly) or a
-  // textarea, then submit. Returns true if a send was attempted.
-  function sendMessage() {
+  // Core: insert an exact string into a contenteditable (Lexical/ProseMirror
+  // friendly) or a textarea, then submit. Returns true if a send was attempted.
+  // Used by both the main message and the scheduled message.
+  function sendRaw(text) {
     // Hard safety net: never post unless we're on the target channel.
     if (!isOnTarget()) return false;
     const input = findInput();
@@ -199,7 +206,6 @@
       return false;
     }
 
-    const text = buildMessage();
     const isTextarea = input.tagName === 'TEXTAREA';
 
     input.focus();
@@ -230,11 +236,30 @@
       dispatchEnter(input);
     }
 
-    sendCount++;
     lastSendAt = Date.now();
+    checkWaitAfterSend();
+    return true;
+  }
+
+  // Main rotating/anti-dup message.
+  function sendMessage() {
+    const text = buildMessage();
+    if (!sendRaw(text)) return false;
+    sendCount++;
     log(`Sent #${sendCount}: "${text.replace(/​/g, '')}"`);
     updateStatus();
-    checkWaitAfterSend();
+    return true;
+  }
+
+  // Scheduled message — sent verbatim (no rotation, no anti-dup char) so chat
+  // commands like !claim are recognized exactly.
+  function sendSecond() {
+    const text = (settings.secondMessage || '').trim();
+    if (!text) return false;
+    if (!sendRaw(text)) return false;
+    secondCount++;
+    log(`Scheduled send: "${text}"`);
+    updateStatus();
     return true;
   }
 
@@ -343,12 +368,35 @@
     nextSendAt = Math.max(byInterval, byCooldown);
   }
 
+  // The scheduled (second) message interval in milliseconds.
+  function secondIntervalMs() {
+    const v = Math.max(1, settings.secondValue || 1);
+    const mult = settings.secondUnit === 'hours' ? 3600 : 60;
+    return v * mult * 1000;
+  }
+  function scheduleSecond() {
+    secondNextSendAt = Date.now() + secondIntervalMs();
+  }
+
   function tick() {
     if (!settings.running) return;
     const now = Date.now();
-    if (now >= nextSendAt && isOnTarget()) {
-      // Off-target ticks are skipped WITHOUT rescheduling, so the moment you
-      // return to the target channel it sends right away, then resumes timing.
+    if (!isOnTarget()) { updateStatus(); return; }
+
+    // Priority 1: the scheduled message (e.g. !claim). It fires less often, so
+    // when it's due it takes precedence and the main message is held back by the
+    // cooldown so the two never post in the same instant.
+    if (settings.secondEnabled && (settings.secondMessage || '').trim() && now >= secondNextSendAt) {
+      sendSecond();
+      scheduleSecond();
+      const gap = Math.max(settings.cooldownSec, 3) * 1000;
+      nextSendAt = Math.max(nextSendAt, lastSendAt + gap);
+      updateStatus();
+      return; // skip the main message this tick
+    }
+
+    // Priority 2: the main rotating message.
+    if (now >= nextSendAt) {
       sendMessage();
       scheduleNext();
     }
@@ -362,6 +410,7 @@
     // First send fires after a full interval (set to 0 below to fire immediately
     // if you prefer). We honor cooldown from the last send too.
     scheduleNext();
+    scheduleSecond();
     if (!tickTimer) tickTimer = setInterval(tick, 1000);
     log('Started.');
     syncControls();
@@ -412,8 +461,11 @@
       .kac-q{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
         border-radius:50%;background:#2a2a30;color:#9a9aa3;font-size:9px;font-weight:700;cursor:help}
       #kac-status,#kac-log{cursor:help}
-      .kac-row input[type=text],.kac-row input[type=number]{background:#17171c;border:1px solid #2a2a30;
+      .kac-row input[type=text],.kac-row input[type=number],.kac-row select{background:#17171c;border:1px solid #2a2a30;
         color:#e7e7ea;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
+      .kac-div{height:1px;background:#2a2a30;margin:3px 0 1px}
+      #kac-sec-status{font-size:11px;color:#9a9aa3;min-height:14px;cursor:help}
+      #kac-sec-status b{color:#53fc18}
       .kac-grid{display:flex;gap:8px}
       .kac-grid .kac-row{flex:1}
       .kac-check{display:flex;align-items:center;gap:6px;color:#cfcfd6;cursor:pointer}
@@ -494,6 +546,32 @@
           <input type="text" id="kac-rotate" placeholder="e.g. KEKW, LULW, Cx W"
             title="Comma-separated list of additional messages. Sends cycle: Message, then each keyword, then loop. Leave empty to just send the Message. Only active while Anti-duplicate is checked." />
         </div>
+        <div class="kac-div"></div>
+        <label class="kac-check"
+          title="A SECOND message on its own long timer (e.g. a bot command like !claim every 4 hours), running alongside the main spammer. When both are due at the same moment, this one takes priority and the main message is held back by the cooldown. Sent EXACTLY as typed (no rotation, no anti-duplicate char) so commands are recognized.">
+          <input type="checkbox" id="kac-sec-en" /> Scheduled message (priority)</label>
+        <div class="kac-row" id="kac-sec-wrap">
+          <label title="Exact text or command to send on the schedule below. Sent verbatim so chat commands like !claim work. No rotation or invisible characters are added.">Message / command <span class="kac-q">?</span></label>
+          <input type="text" id="kac-sec-msg" placeholder="!claim"
+            title="Exact text/command sent on the schedule. Verbatim — no rotation, no anti-duplicate char." />
+          <div class="kac-grid" style="margin-top:6px">
+            <div class="kac-row">
+              <label title="How often to send the scheduled message (with the unit on the right).">Every <span class="kac-q">?</span></label>
+              <input type="number" id="kac-sec-val" min="1" step="1"
+                title="How often to send the scheduled message, in the unit chosen on the right. Example: 4 + hours = every 4 hours." />
+            </div>
+            <div class="kac-row">
+              <label title="Time unit for the scheduled interval.">Unit <span class="kac-q">?</span></label>
+              <select id="kac-sec-unit" title="Minutes or hours for the scheduled interval.">
+                <option value="minutes">minutes</option>
+                <option value="hours">hours</option>
+              </select>
+            </div>
+          </div>
+          <div id="kac-sec-status"
+            title="Countdown to the next scheduled send, and how many have been sent this session."></div>
+        </div>
+        <div class="kac-div"></div>
         <div class="kac-btns">
           <button class="kac-btn" id="kac-toggle"
             title="Start / Stop the auto-sender. While running, messages send on the Interval/Cooldown timer even if this tab is in the background (no window focus needed).">Start</button>
@@ -531,6 +609,12 @@
       dup: p.querySelector('#kac-dup'),
       rotate: p.querySelector('#kac-rotate'),
       rotateRow: p.querySelector('#kac-rotate-row'),
+      secEn: p.querySelector('#kac-sec-en'),
+      secWrap: p.querySelector('#kac-sec-wrap'),
+      secMsg: p.querySelector('#kac-sec-msg'),
+      secVal: p.querySelector('#kac-sec-val'),
+      secUnit: p.querySelector('#kac-sec-unit'),
+      secStatus: p.querySelector('#kac-sec-status'),
       toggle: p.querySelector('#kac-toggle'),
       now: p.querySelector('#kac-now'),
       status: p.querySelector('#kac-status'),
@@ -554,6 +638,11 @@
     updateRandLabels();
     ui.dup.checked = settings.antiDup;
     ui.rotate.value = settings.rotateKeywords;
+    ui.secEn.checked = settings.secondEnabled;
+    ui.secMsg.value = settings.secondMessage;
+    ui.secVal.value = settings.secondValue;
+    ui.secUnit.value = settings.secondUnit;
+    ui.secWrap.classList.toggle('hidden', !settings.secondEnabled);
     ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
     if (settings.pos.left != null) {
       p.style.left = settings.pos.left + 'px';
@@ -603,6 +692,24 @@
       settings.rotateKeywords = ui.rotate.value;
       rotateIndex = 0; // restart the cycle when the list changes
       saveSettings();
+    });
+    ui.secEn.addEventListener('change', () => {
+      settings.secondEnabled = ui.secEn.checked;
+      ui.secWrap.classList.toggle('hidden', !settings.secondEnabled);
+      saveSettings();
+      if (settings.running) scheduleSecond();
+      updateStatus();
+    });
+    ui.secMsg.addEventListener('input', () => { settings.secondMessage = ui.secMsg.value; saveSettings(); updateStatus(); });
+    ui.secVal.addEventListener('input', () => {
+      settings.secondValue = Math.max(1, parseInt(ui.secVal.value, 10) || 1); saveSettings();
+      if (settings.running) scheduleSecond();
+      updateStatus();
+    });
+    ui.secUnit.addEventListener('change', () => {
+      settings.secondUnit = ui.secUnit.value; saveSettings();
+      if (settings.running) scheduleSecond();
+      updateStatus();
     });
     ui.toggle.addEventListener('click', () => settings.running ? stop() : start());
     ui.now.addEventListener('click', sendNow);
@@ -704,8 +811,30 @@
     ui.dot.classList.toggle('on', settings.running);
   }
 
+  // Human-friendly countdown: "3h 59m", "4m 12s", or "9s".
+  function fmtDur(ms) {
+    let s = Math.max(0, Math.ceil(ms / 1000));
+    const h = Math.floor(s / 3600); s -= h * 3600;
+    const m = Math.floor(s / 60); s -= m * 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function updateSecondStatus() {
+    if (!ui.secStatus) return;
+    const msg = (settings.secondMessage || '').trim();
+    if (!settings.secondEnabled || !msg) { ui.secStatus.textContent = ''; return; }
+    if (settings.running) {
+      ui.secStatus.innerHTML = `Next <b>${msg}</b> in <b>${fmtDur(secondNextSendAt - Date.now())}</b> · sent ${secondCount}`;
+    } else {
+      ui.secStatus.innerHTML = `Idle · every ${settings.secondValue} ${settings.secondUnit}`;
+    }
+  }
+
   function updateStatus() {
     if (!ui.status) return;
+    updateSecondStatus();
     const target = targetChannel() || '(unset)';
 
     // Running but on the wrong channel → paused, nothing is sent here.
@@ -753,6 +882,7 @@
     if (settings.running) {
       // Resume after navigation/reload if it was left running.
       scheduleNext();
+      scheduleSecond();
       if (!tickTimer) tickTimer = setInterval(tick, 1000);
       syncControls();
     }
