@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.7.1
+// @version      0.7.2
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -383,19 +383,24 @@
     const now = Date.now();
     if (!isOnTarget()) { updateStatus(); return; }
 
+    // Minimum spacing between ANY two sends (main or scheduled), so the two
+    // timers can never post closer together than the cooldown.
+    const gap = Math.max(settings.cooldownSec, 3) * 1000;
+
     // Priority 1: the scheduled message (e.g. !claim). It fires less often, so
-    // when it's due it takes precedence and the main message is held back by the
-    // cooldown so the two never post in the same instant.
-    if (settings.secondEnabled && (settings.secondMessage || '').trim() && now >= secondNextSendAt) {
+    // when it's due it takes precedence. We also require the cooldown gap since
+    // the last send, so it never lands right on top of a regular message.
+    if (settings.secondEnabled && (settings.secondMessage || '').trim()
+        && now >= secondNextSendAt && now >= lastSendAt + gap) {
       sendSecond();
       scheduleSecond();
-      const gap = Math.max(settings.cooldownSec, 3) * 1000;
       nextSendAt = Math.max(nextSendAt, lastSendAt + gap);
       updateStatus();
       return; // skip the main message this tick
     }
 
-    // Priority 2: the main rotating message.
+    // Priority 2: the main rotating message (scheduleNext already enforces the
+    // cooldown floor against lastSendAt).
     if (now >= nextSendAt) {
       sendMessage();
       scheduleNext();
