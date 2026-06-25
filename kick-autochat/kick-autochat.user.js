@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.7.2
+// @version      0.8.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -43,8 +43,9 @@
     secondUnit: 'hours',    // 'minutes' | 'hours'
     running: false,
     collapsed: false,
+    logOpen: true,             // activity-log drawer open (side-by-side) vs hidden
     pos: { left: null, top: null },
-    size: { w: null, h: null }, // panel width/height in px once the user resizes
+    size: { w: null, h: null }, // controls width/height in px once the user resizes
   };
 
   function loadSettings() {
@@ -447,11 +448,18 @@
 
   function injectStyles() {
     const css = `
-      #kac-panel{position:fixed;z-index:2147483647;top:90px;right:16px;width:248px;
-        min-width:210px;display:flex;flex-direction:column;
-        background:#0f0f12;color:#e7e7ea;font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;
-        border:1px solid #2a2a30;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.5);
-        user-select:none;overflow:hidden}
+      #kac-panel{position:fixed;z-index:2147483647;top:90px;right:16px;
+        display:flex;flex-direction:row;align-items:stretch;gap:8px;
+        color:#e7e7ea;font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;user-select:none}
+      #kac-main{position:relative;display:flex;flex-direction:column;width:248px;min-width:210px;
+        background:#0f0f12;border:1px solid #2a2a30;border-radius:10px;
+        box-shadow:0 8px 28px rgba(0,0,0,.5);overflow:hidden}
+      #kac-drawer{display:flex;flex-direction:column;width:300px;min-width:170px;align-self:stretch;
+        background:#0f0f12;border:1px solid #2a2a30;border-radius:10px;
+        box-shadow:0 8px 28px rgba(0,0,0,.5);overflow:hidden}
+      #kac-drawer-head{flex:0 0 auto;padding:8px 10px;font-weight:700;color:#9a9aa3;
+        background:#13131a;border-bottom:1px solid #2a2a30}
+      #kac-logtab{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:12px;padding:0 4px}
       #kac-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:move;
         background:linear-gradient(90deg,#1b2f1b,#13131a);border-bottom:1px solid #2a2a30}
       #kac-head .dot{width:8px;height:8px;border-radius:50%;background:#666;flex:0 0 auto}
@@ -481,8 +489,8 @@
       #kac-now{background:#2a2a30;color:#e7e7ea}
       #kac-status{font-size:11px;color:#9a9aa3;min-height:14px}
       #kac-status b{color:#53fc18}
-      #kac-log{font-size:10.5px;color:#7d7d85;background:#0a0a0d;border:1px solid #1d1d22;
-        border-radius:6px;padding:6px;flex:1 1 auto;min-height:64px;overflow:auto;white-space:pre-wrap}
+      #kac-log{font-size:10.5px;color:#7d7d85;background:#0a0a0d;
+        padding:6px;flex:1 1 auto;min-height:0;overflow:auto;white-space:pre-wrap}
       #kac-log .err{color:#ff7b7b}
       #kac-foot{flex:0 0 auto;font-size:9.5px;color:#5a5a63;text-align:right;padding-right:14px;cursor:default}
       #kac-resize{position:absolute;right:2px;bottom:2px;width:15px;height:15px;cursor:nwse-resize;
@@ -500,9 +508,11 @@
     const p = document.createElement('div');
     p.id = 'kac-panel';
     p.innerHTML = `
+      <div id="kac-main">
       <div id="kac-head" title="Drag this bar to move the panel. The green dot lights up while auto-sending is running.">
         <span class="dot" id="kac-dot" title="Status light: green = running, grey = idle/stopped."></span>
         <span id="kac-title">Kick Auto-Chat</span>
+        <button id="kac-logtab" title="Show / hide the activity log panel on the right.">◀</button>
         <button id="kac-collapse" title="Collapse / expand the panel. State is remembered.">_</button>
       </div>
       <div id="kac-body">
@@ -585,17 +595,24 @@
         </div>
         <div id="kac-status"
           title="Live status: shows whether it's running, the countdown to the next send, and how many messages have been sent this session."></div>
-        <div id="kac-log"
-          title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Drag the corner grip to make this taller."></div>
         <div id="kac-foot"
           title="Installed script version. Update via Tampermonkey - Check for userscript updates.">v<span id="kac-ver">?</span></div>
       </div>
-      <div id="kac-resize" title="Drag to resize the panel — the log grows to fill the extra space."></div>
+      <div id="kac-resize" title="Drag the corner to resize the controls (taller also makes the log taller)."></div>
+      </div>
+      <div id="kac-drawer">
+        <div id="kac-drawer-head">Activity log</div>
+        <div id="kac-log"
+          title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Toggle it with the arrow in the title bar."></div>
+      </div>
     `;
     document.body.appendChild(p);
 
     ui = {
       panel: p,
+      main: p.querySelector('#kac-main'),
+      drawer: p.querySelector('#kac-drawer'),
+      logtab: p.querySelector('#kac-logtab'),
       head: p.querySelector('#kac-head'),
       titleEl: p.querySelector('#kac-title'),
       dot: p.querySelector('#kac-dot'),
@@ -656,6 +673,7 @@
     }
     if (settings.collapsed) ui.body.classList.add('hidden');
     applySize();
+    applyDrawer();
 
     // Wire events
     ui.target.addEventListener('input', () => {
@@ -718,18 +736,26 @@
     });
     ui.toggle.addEventListener('click', () => settings.running ? stop() : start());
     ui.now.addEventListener('click', sendNow);
+    ui.logtab.addEventListener('click', () => {
+      settings.logOpen = !settings.logOpen;
+      applyDrawer();
+      if (settings.logOpen) clampOnScreen();
+      saveSettings();
+    });
     ui.collapse.addEventListener('click', () => {
       settings.collapsed = !settings.collapsed;
       ui.body.classList.toggle('hidden', settings.collapsed);
       applySize();
+      applyDrawer();
       updateStatus();
       saveSettings();
     });
 
     makeDraggable(p, ui.head);
-    makeResizable(p, ui.resize);
+    makeResizable();
     syncControls();
     updateStatus();
+    if (settings.logOpen && !settings.collapsed) clampOnScreen();
   }
 
   function makeDraggable(panel, handle) {
@@ -761,27 +787,52 @@
     });
   }
 
-  // Apply the saved panel size. Height is only applied when expanded — collapsed
-  // the panel hugs the header.
+  // Apply the saved size to the controls column. Height is only applied when
+  // expanded — collapsed the column hugs the header. The log drawer stretches to
+  // match the column's height automatically (flex align-stretch).
   function applySize() {
-    const p = ui.panel;
-    p.style.width = settings.size.w ? settings.size.w + 'px' : '';
-    p.style.height = (settings.size.h && !settings.collapsed) ? settings.size.h + 'px' : '';
+    const m = ui.main;
+    m.style.width = settings.size.w ? settings.size.w + 'px' : '';
+    m.style.height = (settings.size.h && !settings.collapsed) ? settings.size.h + 'px' : '';
     // The resize grip only makes sense when expanded — hide it when collapsed
     // so it can't be dragged into blank space.
     if (ui.resize) ui.resize.style.display = settings.collapsed ? 'none' : '';
   }
 
-  function makeResizable(panel, handle) {
+  // Show/hide the log drawer (hidden when collapsed regardless of logOpen).
+  function applyDrawer() {
+    const open = settings.logOpen && !settings.collapsed;
+    ui.drawer.style.display = open ? 'flex' : 'none';
+    ui.logtab.textContent = open ? '◀' : '▶';
+    ui.logtab.style.display = settings.collapsed ? 'none' : '';
+  }
+
+  // Keep the (possibly wider) panel on screen — used after opening the drawer.
+  function clampOnScreen() {
+    const r = ui.panel.getBoundingClientRect();
+    let left = r.left, top = r.top;
+    if (r.right > window.innerWidth - 4) left = window.innerWidth - r.width - 4;
+    if (left < 4) left = 4;
+    if (top < 4) top = 4;
+    ui.panel.style.left = Math.round(left) + 'px';
+    ui.panel.style.top = Math.round(top) + 'px';
+    ui.panel.style.right = 'auto';
+    settings.pos = { left: Math.round(left), top: Math.round(top) };
+  }
+
+  // Resize the controls column via the corner grip. The panel is anchored by
+  // left/top first so it grows toward the bottom-right; the drawer follows.
+  function makeResizable() {
+    const handle = ui.resize, main = ui.main, panel = ui.panel;
     let rz = false, sx = 0, sy = 0, sw = 0, sh = 0;
     handle.addEventListener('mousedown', (e) => {
       rz = true;
-      const r = panel.getBoundingClientRect();
-      // Anchor by left/top so the panel grows toward the bottom-right.
-      panel.style.left = r.left + 'px';
-      panel.style.top = r.top + 'px';
+      const pr = panel.getBoundingClientRect();
+      panel.style.left = pr.left + 'px';
+      panel.style.top = pr.top + 'px';
       panel.style.right = 'auto';
-      sx = e.clientX; sy = e.clientY; sw = r.width; sh = r.height;
+      const mr = main.getBoundingClientRect();
+      sx = e.clientX; sy = e.clientY; sw = mr.width; sh = mr.height;
       e.preventDefault();
       e.stopPropagation();
     });
@@ -791,15 +842,16 @@
       let h = Math.round(sh + (e.clientY - sy));
       w = Math.max(210, Math.min(680, w));
       h = Math.max(170, Math.min(Math.round(window.innerHeight * 0.92), h));
-      panel.style.width = w + 'px';
-      panel.style.height = h + 'px';
+      main.style.width = w + 'px';
+      main.style.height = h + 'px';
     });
     document.addEventListener('mouseup', () => {
       if (!rz) return;
       rz = false;
-      const r = panel.getBoundingClientRect();
-      settings.size = { w: Math.round(r.width), h: Math.round(r.height) };
-      settings.pos = { left: Math.round(r.left), top: Math.round(r.top) };
+      const mr = main.getBoundingClientRect();
+      settings.size = { w: Math.round(mr.width), h: Math.round(mr.height) };
+      const pr = panel.getBoundingClientRect();
+      settings.pos = { left: Math.round(pr.left), top: Math.round(pr.top) };
       saveSettings();
     });
   }
