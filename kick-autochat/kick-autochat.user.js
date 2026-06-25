@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.7.0
+// @version      0.7.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -821,6 +821,24 @@
     return `${s}s`;
   }
 
+  // Compact form for the title bar: "3h59m", "4m12s", "9s".
+  function fmtShort(ms) {
+    let s = Math.max(0, Math.ceil(ms / 1000));
+    const h = Math.floor(s / 3600); s -= h * 3600;
+    const m = Math.floor(s / 60); s -= m * 60;
+    if (h > 0) return `${h}h${m}m`;
+    if (m > 0) return `${m}m${s}s`;
+    return `${s}s`;
+  }
+
+  // The scheduled-message tail shown in the title (e.g. " · !claim 3h59m").
+  function secondTitleTail() {
+    const msg = (settings.secondMessage || '').trim();
+    if (!settings.secondEnabled || !msg) return '';
+    const label = msg.length > 10 ? msg.slice(0, 10) : msg;
+    return ` · ${label} ${fmtShort(secondNextSendAt - Date.now())}`;
+  }
+
   function updateSecondStatus() {
     if (!ui.secStatus) return;
     const msg = (settings.secondMessage || '').trim();
@@ -849,10 +867,12 @@
     if (settings.running) {
       const secs = Math.max(0, Math.ceil((nextSendAt - Date.now()) / 1000));
       ui.status.innerHTML = `Running on <b>@${target}</b> — next in <b>${secs}s</b> · sent ${sendCount}${settings.randomize ? ' · rand' : ''}`;
-      // Mirror into the title bar so it's visible even when collapsed.
+      // Mirror into the title bar so it's visible even when collapsed, including
+      // the scheduled-message countdown (e.g. !claim 3h59m).
+      const tail = secondTitleTail();
       ui.titleEl.textContent = settings.collapsed
-        ? `${secs}s · ${sendCount} sent`
-        : `Kick Auto-Chat · ${secs}s · ${sendCount} sent`;
+        ? `${secs}s · ${sendCount} sent${tail}`
+        : `Kick Auto-Chat · ${secs}s · ${sendCount} sent${tail}`;
     } else {
       ui.status.innerHTML = `Idle · target @${target} · sent ${sendCount}`;
       ui.titleEl.textContent = settings.collapsed
