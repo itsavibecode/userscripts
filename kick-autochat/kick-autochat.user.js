@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.9.0
+// @version      0.9.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -492,6 +492,9 @@
       .kac-row input[type=text],.kac-row input[type=number],.kac-row select{background:#17171c;border:1px solid #2a2a30;
         color:#e7e7ea;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
       .kac-div{height:1px;background:#2a2a30;margin:3px 0 1px}
+      .kac-inat{display:flex;align-items:center;gap:2px;background:#17171c;border:1px solid #2a2a30;border-radius:6px;padding-left:8px}
+      .kac-inat span{color:#9a9aa3;font-weight:700;font-size:12px}
+      .kac-inat input[type=text]{border:none;background:transparent;flex:1 1 auto;width:auto;padding-left:2px}
       #kac-sec-status{font-size:11px;color:#9a9aa3;min-height:14px;cursor:help}
       #kac-sec-status b{color:#53fc18}
       .kac-grid{display:flex;gap:8px}
@@ -606,9 +609,12 @@
           title="Watch the on-page chat for messages that mention or reply to your username, and log them to the Mentions tab in the drawer. Read-only — it never sends or replies. Works on whatever channel you're viewing, even when the spammer is stopped.">
           <input type="checkbox" id="kac-watch-en" /> Watch for @mentions &amp; replies</label>
         <div class="kac-row" id="kac-watch-wrap">
-          <label title="Your EXACT Kick username (the name shown on your own chat messages). Used to detect @yourname and replies to you.">Your Kick username <span class="kac-q">?</span></label>
-          <input type="text" id="kac-watch-user" placeholder="your_kick_name"
-            title="Type your exact Kick username. The watcher flags any chat message containing @thisname or a reply to it." />
+          <label title="Your EXACT Kick username (the name shown on your own chat messages), typed WITHOUT the @ — it is shown for you. Used to detect @yourname and replies to you.">Your Kick username <span class="kac-q">?</span></label>
+          <div class="kac-inat" title="Type your username without the @ — the @ is added automatically.">
+            <span>@</span>
+            <input type="text" id="kac-watch-user" placeholder="your_kick_name"
+              title="Type your exact Kick username WITHOUT the @ (it's shown for you). The watcher flags any chat message containing @thisname or a reply to it." />
+          </div>
           <label class="kac-check" style="margin-top:6px"
             title="Play a short beep when a new mention arrives.">
             <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
@@ -1051,6 +1057,12 @@
     } catch (e) { /* autoplay/policy — ignore */ }
   }
 
+  // Your username, normalized: trimmed and with any leading @ removed (so it
+  // works whether or not the user types the @).
+  function watchName() {
+    return (settings.watchUsername || '').trim().replace(/^@+/, '');
+  }
+
   function matchesMention(text, name) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (new RegExp('@' + esc + '\\b', 'i').test(text)) {
@@ -1091,7 +1103,7 @@
 
   function handleChatNode(node) {
     if (!settings.watchEnabled || node.nodeType !== 1) return;
-    const name = (settings.watchUsername || '').trim();
+    const name = watchName();
     if (!name) return;
     const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
     if (!text || text.length > 600) return;
@@ -1125,7 +1137,7 @@
         for (const mu of muts) for (const node of mu.addedNodes) handleChatNode(node);
       });
       chatObserver.observe(list, { childList: true, subtree: true });
-      log(`Mention watcher attached (@${(settings.watchUsername || '').trim() || '?'}).`);
+      log(`Mention watcher attached (@${watchName() || '?'}).`);
     };
     attach();
     chatFindTimer = setInterval(() => { if (!chatObserver) attach(); }, 3000);
@@ -1137,7 +1149,7 @@
   }
 
   function applyWatcher() {
-    if (settings.watchEnabled && (settings.watchUsername || '').trim()) startWatcher();
+    if (settings.watchEnabled && watchName()) startWatcher();
     else stopWatcher();
   }
 
