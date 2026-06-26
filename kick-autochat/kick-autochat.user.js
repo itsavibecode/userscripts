@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.9.2
+// @version      0.9.3
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -535,7 +535,8 @@
       <div id="kac-head" title="Drag this bar to move the panel. The green dot lights up while auto-sending is running.">
         <span class="dot" id="kac-dot" title="Status light: green = running, grey = idle/stopped."></span>
         <span id="kac-title">Kick Auto-Chat</span>
-        <button id="kac-logtab" title="Show / hide the activity log panel on the right.">◀</button>
+        <button id="kac-logtab" title="Show / hide the log & mentions panel on the right.">◀</button>
+        <span id="kac-logtab-badge" class="kac-badge" title="Unseen mentions — open the panel and click the Mentions tab to view them.">0</span>
         <button id="kac-collapse" title="Collapse / expand the panel. State is remembered.">_</button>
       </div>
       <div id="kac-body">
@@ -657,6 +658,7 @@
       main: p.querySelector('#kac-main'),
       drawer: p.querySelector('#kac-drawer'),
       logtab: p.querySelector('#kac-logtab'),
+      logtabBadge: p.querySelector('#kac-logtab-badge'),
       head: p.querySelector('#kac-head'),
       titleEl: p.querySelector('#kac-title'),
       dot: p.querySelector('#kac-dot'),
@@ -1044,12 +1046,18 @@
   }
 
   function updateMenBadge() {
+    const label = unreadMen > 99 ? '99+' : String(unreadMen);
     if (ui.menBadge) {
-      if (unreadMen > 0) { ui.menBadge.textContent = unreadMen > 99 ? '99+' : unreadMen; ui.menBadge.style.display = ''; }
+      if (unreadMen > 0) { ui.menBadge.textContent = label; ui.menBadge.style.display = ''; }
       else ui.menBadge.style.display = 'none';
     }
-    // Also tint the drawer arrow red when there are unseen mentions and the
-    // drawer/tab isn't showing them.
+    // Numeric badge on the title-bar arrow, so the count is visible even when
+    // the drawer is closed.
+    if (ui.logtabBadge) {
+      if (unreadMen > 0) { ui.logtabBadge.textContent = label; ui.logtabBadge.style.display = ''; }
+      else ui.logtabBadge.style.display = 'none';
+    }
+    // Also tint the drawer arrow red when there are unseen mentions.
     if (ui.logtab) ui.logtab.style.color = unreadMen > 0 ? '#ff4757' : '';
   }
 
