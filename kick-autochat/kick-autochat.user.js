@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.8.0
+// @version      0.9.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -41,6 +41,9 @@
     secondMessage: '!claim',// sent verbatim, no rotation/anti-dup
     secondValue: 4,         // how often (number)
     secondUnit: 'hours',    // 'minutes' | 'hours'
+    watchEnabled: false,    // watch chat for @mentions / replies to your username
+    watchUsername: '',      // your own Kick username (exact)
+    watchSound: true,       // beep on a new mention
     running: false,
     collapsed: false,
     logOpen: true,             // activity-log drawer open (side-by-side) vs hidden
@@ -77,6 +80,11 @@
   let dupCounter = 0;         // drives the anti-duplicate varying suffix
   let rotateIndex = 0;        // position in the rotation pool (sequential mode)
   let lastBase = null;        // last text sent, so random mode never repeats it back-to-back
+  let chatObserver = null;    // MutationObserver watching chat for mentions
+  let chatFindTimer = null;   // retry timer to (re)attach the observer
+  const recentMentions = new Set(); // de-dupe signatures of logged mentions
+  let activeTab = 'log';      // which drawer tab is showing ('log' | 'men')
+  let unreadMen = 0;          // unseen mention count (for the badge)
 
   // ----------------------------------------------------------------------
   // Chat input / send logic
@@ -457,8 +465,15 @@
       #kac-drawer{display:flex;flex-direction:column;width:300px;min-width:170px;align-self:stretch;
         background:#0f0f12;border:1px solid #2a2a30;border-radius:10px;
         box-shadow:0 8px 28px rgba(0,0,0,.5);overflow:hidden}
-      #kac-drawer-head{flex:0 0 auto;padding:8px 10px;font-weight:700;color:#9a9aa3;
-        background:#13131a;border-bottom:1px solid #2a2a30}
+      #kac-drawer-head{flex:0 0 auto;display:flex;gap:4px;background:#13131a;border-bottom:1px solid #2a2a30}
+      .kac-tab{flex:1;cursor:pointer;background:none;border:none;color:#9a9aa3;font:inherit;font-weight:700;
+        padding:8px 6px;border-bottom:2px solid transparent;display:flex;align-items:center;justify-content:center;gap:5px}
+      .kac-tab.active{color:#e7e7ea;border-bottom-color:#53fc18}
+      .kac-badge{display:none;min-width:15px;padding:0 4px;border-radius:8px;background:#ff4757;color:#fff;
+        font-size:9px;font-weight:700;text-align:center;line-height:15px}
+      #kac-mentions{flex:1 1 auto;min-height:0;overflow:auto;padding:6px;font-size:10.5px;background:#0a0a0d}
+      .kac-men-item{color:#e7e7ea;padding:3px 4px;border-bottom:1px solid #16161b;word-break:break-word}
+      .kac-men-item.reply{color:#9ad4ff}
       #kac-logtab{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:12px;padding:0 4px}
       #kac-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:move;
         background:linear-gradient(90deg,#1b2f1b,#13131a);border-bottom:1px solid #2a2a30}
@@ -587,6 +602,18 @@
             title="Countdown to the next scheduled send, and how many have been sent this session."></div>
         </div>
         <div class="kac-div"></div>
+        <label class="kac-check"
+          title="Watch the on-page chat for messages that mention or reply to your username, and log them to the Mentions tab in the drawer. Read-only — it never sends or replies. Works on whatever channel you're viewing, even when the spammer is stopped.">
+          <input type="checkbox" id="kac-watch-en" /> Watch for @mentions &amp; replies</label>
+        <div class="kac-row" id="kac-watch-wrap">
+          <label title="Your EXACT Kick username (the name shown on your own chat messages). Used to detect @yourname and replies to you.">Your Kick username <span class="kac-q">?</span></label>
+          <input type="text" id="kac-watch-user" placeholder="your_kick_name"
+            title="Type your exact Kick username. The watcher flags any chat message containing @thisname or a reply to it." />
+          <label class="kac-check" style="margin-top:6px"
+            title="Play a short beep when a new mention arrives.">
+            <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
+        </div>
+        <div class="kac-div"></div>
         <div class="kac-btns">
           <button class="kac-btn" id="kac-toggle"
             title="Start / Stop the auto-sender. While running, messages send on the Interval/Cooldown timer even if this tab is in the background (no window focus needed).">Start</button>
@@ -601,9 +628,14 @@
       <div id="kac-resize" title="Drag the corner to resize the controls (taller also makes the log taller)."></div>
       </div>
       <div id="kac-drawer">
-        <div id="kac-drawer-head">Activity log</div>
+        <div id="kac-drawer-head">
+          <button id="kac-tab-log" class="kac-tab active" title="Activity log: sends, start/stop, and errors.">Log</button>
+          <button id="kac-tab-men" class="kac-tab" title="Mentions: messages that @ you or reply to you (needs the watcher enabled below).">Mentions <span id="kac-men-badge" class="kac-badge">0</span></button>
+        </div>
         <div id="kac-log"
           title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Toggle it with the arrow in the title bar."></div>
+        <div id="kac-mentions" style="display:none"
+          title="Live @mentions and replies to your username, captured from chat. Read-only — the script never replies. Enable it with 'Watch for @mentions' in the controls."></div>
       </div>
     `;
     document.body.appendChild(p);
@@ -637,6 +669,14 @@
       secVal: p.querySelector('#kac-sec-val'),
       secUnit: p.querySelector('#kac-sec-unit'),
       secStatus: p.querySelector('#kac-sec-status'),
+      watchEn: p.querySelector('#kac-watch-en'),
+      watchWrap: p.querySelector('#kac-watch-wrap'),
+      watchUser: p.querySelector('#kac-watch-user'),
+      watchSound: p.querySelector('#kac-watch-sound'),
+      tabLog: p.querySelector('#kac-tab-log'),
+      tabMen: p.querySelector('#kac-tab-men'),
+      menBadge: p.querySelector('#kac-men-badge'),
+      mentions: p.querySelector('#kac-mentions'),
       toggle: p.querySelector('#kac-toggle'),
       now: p.querySelector('#kac-now'),
       status: p.querySelector('#kac-status'),
@@ -665,6 +705,12 @@
     ui.secVal.value = settings.secondValue;
     ui.secUnit.value = settings.secondUnit;
     ui.secWrap.classList.toggle('hidden', !settings.secondEnabled);
+    ui.watchEn.checked = settings.watchEnabled;
+    ui.watchUser.value = settings.watchUsername;
+    ui.watchSound.checked = settings.watchSound;
+    ui.watchWrap.classList.toggle('hidden', !settings.watchEnabled);
+    setTab('log');
+    updateMenBadge();
     ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
     if (settings.pos.left != null) {
       p.style.left = settings.pos.left + 'px';
@@ -734,6 +780,22 @@
       if (settings.running) scheduleSecond();
       updateStatus();
     });
+    ui.watchEn.addEventListener('change', () => {
+      settings.watchEnabled = ui.watchEn.checked;
+      ui.watchWrap.classList.toggle('hidden', !settings.watchEnabled);
+      saveSettings();
+      applyWatcher();
+    });
+    ui.watchUser.addEventListener('input', () => {
+      settings.watchUsername = ui.watchUser.value;
+      saveSettings();
+      // Matching reads the name live; just start the observer if it wasn't
+      // running yet (e.g. the field was empty before), or stop it if cleared.
+      applyWatcher();
+    });
+    ui.watchSound.addEventListener('change', () => { settings.watchSound = ui.watchSound.checked; saveSettings(); });
+    ui.tabLog.addEventListener('click', () => setTab('log'));
+    ui.tabMen.addEventListener('click', () => setTab('men'));
     ui.toggle.addEventListener('click', () => settings.running ? stop() : start());
     ui.now.addEventListener('click', sendNow);
     ui.logtab.addEventListener('click', () => {
@@ -951,11 +1013,141 @@
   }
 
   // ----------------------------------------------------------------------
+  // Mention watcher — reads the on-page chat (DOM) for @mentions and replies
+  // to your own username and logs them to the Mentions tab. Read-only; it
+  // never sends anything.
+  // ----------------------------------------------------------------------
+  function setTab(tab) {
+    activeTab = tab;
+    if (ui.log) ui.log.style.display = tab === 'log' ? '' : 'none';
+    if (ui.mentions) ui.mentions.style.display = tab === 'men' ? '' : 'none';
+    if (ui.tabLog) ui.tabLog.classList.toggle('active', tab === 'log');
+    if (ui.tabMen) ui.tabMen.classList.toggle('active', tab === 'men');
+    if (tab === 'men') { unreadMen = 0; updateMenBadge(); }
+  }
+
+  function updateMenBadge() {
+    if (ui.menBadge) {
+      if (unreadMen > 0) { ui.menBadge.textContent = unreadMen > 99 ? '99+' : unreadMen; ui.menBadge.style.display = ''; }
+      else ui.menBadge.style.display = 'none';
+    }
+    // Also tint the drawer arrow red when there are unseen mentions and the
+    // drawer/tab isn't showing them.
+    if (ui.logtab) ui.logtab.style.color = unreadMen > 0 ? '#ff4757' : '';
+  }
+
+  function beep() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type = 'sine'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.07, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
+      o.start(); o.stop(ctx.currentTime + 0.26);
+      o.onended = () => { try { ctx.close(); } catch (e) {} };
+    } catch (e) { /* autoplay/policy — ignore */ }
+  }
+
+  function matchesMention(text, name) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp('@' + esc + '\\b', 'i').test(text)) {
+      return { hit: true, isReply: /replying to/i.test(text) };
+    }
+    if (/replying to/i.test(text) && new RegExp('\\b' + esc + '\\b', 'i').test(text)) {
+      return { hit: true, isReply: true };
+    }
+    return { hit: false };
+  }
+
+  function extractSender(node) {
+    let s = '';
+    try {
+      const el = node.querySelector && node.querySelector('[class*="username" i], [data-chat-entry-user], a[href^="/"]');
+      if (el) s = el.textContent || '';
+      if (!s) {
+        const t = node.textContent || '';
+        const i = t.indexOf(':');
+        if (i > 0 && i < 32) s = t.slice(0, i);
+      }
+    } catch (e) {}
+    return (s || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function addMention(text, isReply) {
+    if (!ui.mentions) return;
+    const t = new Date().toLocaleTimeString();
+    const div = document.createElement('div');
+    div.className = 'kac-men-item' + (isReply ? ' reply' : '');
+    div.textContent = `[${t}] ${isReply ? '↩ ' : ''}${text}`;
+    ui.mentions.appendChild(div);
+    ui.mentions.scrollTop = ui.mentions.scrollHeight;
+    while (ui.mentions.childNodes.length > 60) ui.mentions.removeChild(ui.mentions.firstChild);
+    if (activeTab !== 'men') { unreadMen++; updateMenBadge(); }
+    if (settings.watchSound) beep();
+  }
+
+  function handleChatNode(node) {
+    if (!settings.watchEnabled || node.nodeType !== 1) return;
+    const name = (settings.watchUsername || '').trim();
+    if (!name) return;
+    const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text || text.length > 600) return;
+    const m = matchesMention(text, name);
+    if (!m.hit) return;
+    const sig = text.slice(0, 180);
+    if (recentMentions.has(sig)) return;
+    recentMentions.add(sig);
+    while (recentMentions.size > 80) recentMentions.delete(recentMentions.values().next().value);
+    const sender = extractSender(node);
+    if (sender && sender.toLowerCase() === name.toLowerCase()) return; // your own message
+    addMention(text, m.isReply);
+  }
+
+  function findChatList() {
+    const sels = ['[data-chat-entry]', '[data-chat-id]', '[class*="chat-entry" i]', '[class*="chatMessage" i]'];
+    for (const s of sels) {
+      const el = document.querySelector(s);
+      if (el) return el.parentElement || el;
+    }
+    return null;
+  }
+
+  function startWatcher() {
+    if (chatFindTimer || chatObserver) return;
+    const attach = () => {
+      if (chatObserver) return;
+      const list = findChatList();
+      if (!list) return;
+      chatObserver = new MutationObserver((muts) => {
+        for (const mu of muts) for (const node of mu.addedNodes) handleChatNode(node);
+      });
+      chatObserver.observe(list, { childList: true, subtree: true });
+      log(`Mention watcher attached (@${(settings.watchUsername || '').trim() || '?'}).`);
+    };
+    attach();
+    chatFindTimer = setInterval(() => { if (!chatObserver) attach(); }, 3000);
+  }
+
+  function stopWatcher() {
+    if (chatObserver) { chatObserver.disconnect(); chatObserver = null; }
+    if (chatFindTimer) { clearInterval(chatFindTimer); chatFindTimer = null; }
+  }
+
+  function applyWatcher() {
+    if (settings.watchEnabled && (settings.watchUsername || '').trim()) startWatcher();
+    else stopWatcher();
+  }
+
+  // ----------------------------------------------------------------------
   // Boot — wait until the page body exists, then mount.
   // ----------------------------------------------------------------------
   function boot() {
     injectStyles();
     buildPanel();
+    applyWatcher();
     if (settings.running) {
       // Resume after navigation/reload if it was left running.
       scheduleNext();
