@@ -7,6 +7,8 @@ every day.
 | --- | --- |
 | [tiktoklive](./tiktoklive) | Toggle the left navigation sidebar on TikTok LIVE pages so the video and chat get more room. |
 | [gemini-activity](./gemini-activity) | Manager panel for Gemini My Activity: load everything, then bulk-delete by date or by post with checkboxes and image/text previews. |
+| [kick-autochat](./kick-autochat) | Auto-send a message to a Kick.com chat on a timer without needing window focus, with a draggable GUI, scheduled messages, and a mention watcher. |
+| [kick-chat-cleaner](./kick-chat-cleaner) | Hide emote-only chat messages and collapse duplicate messages (keeping the original) on kick.com. |
 
 ## Installing any script in this repo
 
