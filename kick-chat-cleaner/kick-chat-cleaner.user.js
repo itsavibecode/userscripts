@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Chat Cleaner
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.0
-// @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable GUI with live counters.
+// @version      0.3.1
+// @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible GUI with live counters.
 // @author       itsavibecode
 // @match        https://kick.com/*
 // @run-at       document-start
@@ -62,6 +62,8 @@
     // UI state.
     panelX:            store.get('panelX', null),
     panelY:            store.get('panelY', null),
+    panelW:            store.get('panelW', null),
+    panelH:            store.get('panelH', null),
     minimized:         store.get('minimized', false),
   };
 
@@ -205,16 +207,19 @@
     #kcc-panel { position: fixed; z-index: 2147483000; top: 96px; right: 16px;
       width: 226px; font: 12px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
       color: #e9e9ee; background: #16161b; border: 1px solid #2a2a33;
-      border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45); }
+      border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45);
+      display: flex; flex-direction: column; overflow: hidden;
+      resize: both; min-width: 190px; min-height: 88px; max-width: 560px; max-height: 92vh; }
+    #kcc-panel.min { resize: none; min-height: 0; height: auto !important; }
     #kcc-panel * { box-sizing: border-box; }
     #kcc-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
-      cursor: move; border-bottom: 1px solid #2a2a33; user-select: none; }
+      cursor: move; border-bottom: 1px solid #2a2a33; user-select: none; flex: 0 0 auto; }
     #kcc-dot { width: 8px; height: 8px; border-radius: 50%; background: #53d769; flex: 0 0 auto; }
     #kcc-dot.off { background: #7a7a85; }
     #kcc-title { font-weight: 600; font-size: 12px; flex: 1 1 auto; white-space: nowrap; }
     #kcc-min { cursor: pointer; opacity: .7; padding: 0 4px; font-size: 14px; }
     #kcc-min:hover { opacity: 1; }
-    #kcc-body { padding: 8px 10px 10px; }
+    #kcc-body { padding: 8px 10px 10px; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
     .kcc-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; }
     .kcc-row label { cursor: pointer; user-select: none; }
     .kcc-sw { position: relative; width: 32px; height: 18px; flex: 0 0 auto; }
@@ -320,6 +325,26 @@
       panel.style.top = cfg.panelY + 'px';
       panel.style.right = 'auto';
     }
+    // Restore saved size (only apply the height when expanded — a collapsed
+    // panel sizes to its header).
+    if (cfg.panelW) panel.style.width = cfg.panelW + 'px';
+    if (cfg.panelH && !cfg.minimized) panel.style.height = cfg.panelH + 'px';
+
+    // Persist size as the user drags the resize handle (debounced; skip the
+    // collapsed state so we don't overwrite the real height).
+    let sizeTimer;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(sizeTimer);
+      sizeTimer = setTimeout(() => {
+        if (cfg.minimized) return;
+        const r = panel.getBoundingClientRect();
+        cfg.panelW = Math.round(r.width);
+        cfg.panelH = Math.round(r.height);
+        store.set('panelW', cfg.panelW);
+        store.set('panelH', cfg.panelH);
+      }, 350);
+    });
+    ro.observe(panel);
 
     // Wiring
     on.inp.addEventListener('change', () => { cfg.enabled = on.inp.checked; store.set('enabled', cfg.enabled); els.dot.classList.toggle('off', !cfg.enabled); });
@@ -342,6 +367,9 @@
       panel.classList.toggle('min', cfg.minimized);
       min.textContent = cfg.minimized ? '+' : '–';
       store.set('minimized', cfg.minimized);
+      // Collapsed: let the panel shrink to its header. Expanded: restore height.
+      if (cfg.minimized) panel.style.height = 'auto';
+      else if (cfg.panelH) panel.style.height = cfg.panelH + 'px';
     });
 
     makeDraggable(panel, head, min);
@@ -401,5 +429,5 @@
     mk('hidePhrases', 'Remove custom phrases');
   }
 
-  console.log('[Kick Chat Cleaner] v0.3.0 active (WebSocket filter installed at document-start)');
+  console.log('[Kick Chat Cleaner] v0.3.1 active (WebSocket filter installed at document-start)');
 })();

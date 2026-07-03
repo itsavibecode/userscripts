@@ -8,8 +8,9 @@ Quiets down [kick.com](https://kick.com) chat by removing noise:
   (original) occurrence and dropping the rest.
 - **Custom phrases** — messages containing any word or phrase on your blocklist.
 
-A small draggable GUI shows live counts of what's been removed and lets you
-toggle each behaviour.
+A small GUI shows live counts of what's been removed and lets you toggle each
+behaviour. The panel is **draggable, resizable** (drag the bottom-right corner),
+and **collapsible** (the – / + in its header); its position and size persist.
 
 ## How it works (and why it's not a `display:none` script)
 
@@ -78,7 +79,7 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.3.0
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.3.1
    active` and the panel appears (top-right by default; drag it anywhere).
 
 **Updating from an older version:** Tampermonkey → installed scripts → Kick
@@ -99,6 +100,12 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.3.1
+- Panel is now **resizable** (drag the bottom-right corner) with the size saved
+  and restored, in addition to being draggable and collapsible. Collapsing
+  shrinks it to just the header (no empty space), and the body scrolls when the
+  panel is made shorter than its contents.
 
 ### 0.3.0
 - Added a **custom phrase blocklist** — a box in the panel (one phrase per
