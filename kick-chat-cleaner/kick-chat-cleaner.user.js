@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Chat Cleaner
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.2
-// @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible top-layer GUI with live counters.
+// @version      0.4.0
+// @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible top-layer GUI with live counters and a slide-out log of what was removed.
 // @author       itsavibecode
 // @match        https://kick.com/*
 // @run-at       document-start
@@ -65,6 +65,8 @@
     panelW:            store.get('panelW', null),
     panelH:            store.get('panelH', null),
     minimized:         store.get('minimized', false),
+    logOpen:           store.get('logOpen', false),
+    logTab:            store.get('logTab', 'emote'),
   };
 
   // Parsed, lowercased phrase list (rebuilt whenever phrasesText changes).
@@ -154,10 +156,31 @@
     const content = payload.content;
     const username = payload.sender && payload.sender.username;
 
-    if (cfg.hidePhrases && matchesPhrase(content)) { stats.phrase++; updatePanel(); return true; }
-    if (cfg.hideEmoteOnly && isEmoteOnly(content)) { stats.emote++; updatePanel(); return true; }
-    if (cfg.hideDuplicates && isDuplicate(content, username)) { stats.dupe++; updatePanel(); return true; }
+    if (cfg.hidePhrases && matchesPhrase(content)) { stats.phrase++; recordRemoval('phrase', username, content); updatePanel(); return true; }
+    if (cfg.hideEmoteOnly && isEmoteOnly(content)) { stats.emote++; recordRemoval('emote', username, content); updatePanel(); return true; }
+    if (cfg.hideDuplicates && isDuplicate(content, username)) { stats.dupe++; recordRemoval('dupe', username, content); updatePanel(); return true; }
     return false;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Removal log (what got dropped, per category, newest first)          *
+   * ------------------------------------------------------------------ */
+  const LOG_CAP = 250;
+  const log = { emote: [], dupe: [], phrase: [] };
+
+  // [emote:id:name] -> :name: so the log is human-readable.
+  function displayContent(content) {
+    return String(content == null ? '' : content).replace(/\[emote:\d+:([^\]]*)\]/g, ':$1:').trim();
+  }
+
+  function recordRemoval(cat, username, content) {
+    const list = log[cat];
+    if (!list) return;
+    let hh = '', mm = '';
+    try { const d = new Date(); hh = String(d.getHours()).padStart(2, '0'); mm = String(d.getMinutes()).padStart(2, '0'); } catch (_) {}
+    list.unshift({ u: String(username || ''), t: displayContent(content), time: hh + ':' + mm });
+    if (list.length > LOG_CAP) list.pop();
+    appendLogEntry(cat);
   }
 
   /* ------------------------------------------------------------------ *
@@ -201,29 +224,36 @@
   /* ------------------------------------------------------------------ *
    * GUI                                                                 *
    * ------------------------------------------------------------------ */
-  let panel = null;
+  let panel = null, mainEl = null, logEl = null, logListEl = null;
+  let activeTab = 'emote';
   const els = {};
 
   const css = `
     #kcc-panel { position: fixed; z-index: 2147483647; inset: auto; margin: 0; padding: 0;
       top: 96px; right: 16px;
-      width: 226px; font: 12px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
-      color: #e9e9ee; background: #16161b; border: 1px solid #2a2a33;
+      font: 12px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; color: #e9e9ee;
+      display: flex; flex-direction: row; align-items: flex-start;
+      background: transparent; border: 0; overflow: visible; }
+    #kcc-panel:popover-open { display: flex; }
+    #kcc-panel::backdrop { background: transparent; }
+    #kcc-panel * { box-sizing: border-box; }
+
+    #kcc-main { order: 2; width: 226px; background: #16161b; border: 1px solid #2a2a33;
       border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45);
       display: flex; flex-direction: column; overflow: hidden;
       resize: both; min-width: 190px; min-height: 88px; max-width: 560px; max-height: 92vh; }
-    #kcc-panel:popover-open { display: flex; }
-    #kcc-panel::backdrop { background: transparent; }
-    #kcc-panel.min { resize: none; min-height: 0; height: auto !important; }
-    #kcc-panel * { box-sizing: border-box; }
+    #kcc-main.min { resize: none; min-height: 0; height: auto !important; }
+    #kcc-main.min #kcc-body { display: none; }
     #kcc-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
       cursor: move; border-bottom: 1px solid #2a2a33; user-select: none; flex: 0 0 auto; }
     #kcc-dot { width: 8px; height: 8px; border-radius: 50%; background: #53d769; flex: 0 0 auto; }
     #kcc-dot.off { background: #7a7a85; }
     #kcc-title { font-weight: 600; font-size: 12px; flex: 1 1 auto; white-space: nowrap; }
-    #kcc-min { cursor: pointer; opacity: .7; padding: 0 4px; font-size: 14px; }
-    #kcc-min:hover { opacity: 1; }
+    .kcc-hbtn { cursor: pointer; opacity: .7; padding: 0 4px; font-size: 13px; }
+    .kcc-hbtn:hover { opacity: 1; }
+    #kcc-logbtn.on { opacity: 1; color: #53a2ff; }
     #kcc-body { padding: 8px 10px 10px; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+
     .kcc-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; }
     .kcc-toggle { cursor: pointer; user-select: none; }
     .kcc-txt { flex: 1 1 auto; }
@@ -245,10 +275,32 @@
     .kcc-hr { border: 0; border-top: 1px solid #23232b; margin: 8px 0 4px; }
     #kcc-stats { margin-top: 8px; padding-top: 8px; border-top: 1px solid #2a2a33;
       display: flex; gap: 6px; text-align: center; }
-    #kcc-stats > div { flex: 1; }
+    #kcc-stats > div { flex: 1; border-radius: 6px; padding: 2px 0; }
+    #kcc-stats > div.clk { cursor: pointer; }
+    #kcc-stats > div.clk:hover { background: #20202a; }
     #kcc-stats b { display: block; font-size: 15px; color: #fff; }
     #kcc-stats span { font-size: 9px; opacity: .6; text-transform: uppercase; letter-spacing: .03em; }
-    #kcc-panel.min #kcc-body { display: none; }
+
+    /* slide-out removed-message log */
+    #kcc-log { order: 1; width: 0; overflow: hidden; transition: width .2s ease;
+      background: #16161b; border: 1px solid #2a2a33; border-radius: 10px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.45); display: flex; flex-direction: column; max-height: 82vh; }
+    #kcc-log:not(.open) { border-color: transparent; box-shadow: none; }
+    #kcc-log.open { width: 292px; margin-right: 8px; }
+    #kcc-log-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+      border-bottom: 1px solid #2a2a33; flex: 0 0 auto; white-space: nowrap; }
+    #kcc-log-title { font-weight: 600; flex: 1 1 auto; }
+    #kcc-log-clear { cursor: pointer; opacity: .7; font-size: 11px; }
+    #kcc-log-clear:hover { opacity: 1; color: #ff6b6b; }
+    #kcc-tabs { display: flex; gap: 4px; padding: 6px 8px; flex: 0 0 auto; }
+    .kcc-tab { flex: 1; text-align: center; padding: 4px 4px; border-radius: 6px; cursor: pointer;
+      background: #20202a; font-size: 11px; user-select: none; white-space: nowrap; }
+    .kcc-tab.active { background: #53a2ff; color: #fff; }
+    #kcc-list { flex: 1 1 auto; overflow-y: auto; padding: 2px 8px 8px; min-height: 46px; }
+    .kcc-le { padding: 3px 0; border-bottom: 1px solid #1e1e26; word-break: break-word; font-size: 11px; }
+    .kcc-le .u { color: #7db8ff; font-weight: 600; }
+    .kcc-le .ts { opacity: .4; font-size: 10px; float: right; margin-left: 6px; }
+    #kcc-empty { opacity: .5; text-align: center; padding: 18px 8px; font-size: 11px; }
   `;
 
   function el(tag, props, kids) {
@@ -274,26 +326,86 @@
     return { row, inp };
   }
 
-  function statCell(labelText, ref) {
+  function statCell(labelText, ref, cat) {
     const b = el('b', { text: '0' });
     els[ref] = b;
-    return el('div', {}, [b, el('span', { text: labelText })]);
+    const d = el('div', { class: cat ? 'clk' : '' }, [b, el('span', { text: labelText })]);
+    if (cat) d.addEventListener('click', () => openLog(cat));
+    return d;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Log drawer rendering                                                *
+   * ------------------------------------------------------------------ */
+  function logEntryNode(e) {
+    return el('div', { class: 'kcc-le' }, [
+      el('span', { class: 'ts', text: e.time }),
+      el('span', { class: 'u', text: e.u + ': ' }),
+      el('span', { class: 'm', text: e.t }),
+    ]);
+  }
+
+  function renderLog() {
+    if (!logListEl) return;
+    logListEl.textContent = '';
+    const arr = log[activeTab] || [];
+    if (!arr.length) {
+      logListEl.appendChild(el('div', { id: 'kcc-empty', text: 'Nothing removed yet.' }));
+      return;
+    }
+    for (let i = 0; i < arr.length; i++) logListEl.appendChild(logEntryNode(arr[i]));
+  }
+
+  // Called from recordRemoval for every drop; cheaply prepends one row when the
+  // drawer is open on the matching tab (full re-render only happens on open).
+  function appendLogEntry(cat) {
+    if (!logListEl || !logEl || !logEl.classList.contains('open') || cat !== activeTab) return;
+    const empty = logListEl.querySelector('#kcc-empty');
+    if (empty) empty.remove();
+    logListEl.insertBefore(logEntryNode(log[cat][0]), logListEl.firstChild);
+    while (logListEl.children.length > LOG_CAP) logListEl.removeChild(logListEl.lastChild);
+  }
+
+  function setTab(cat) {
+    activeTab = cat;
+    cfg.logTab = cat;
+    store.set('logTab', cat);
+    if (els.tabs) els.tabs.forEach((t) => t.el.classList.toggle('active', t.cat === cat));
+    renderLog();
+  }
+
+  function toggleLog(force) {
+    if (!logEl) return;
+    const open = force != null ? force : !logEl.classList.contains('open');
+    logEl.classList.toggle('open', open);
+    if (els.logBtn) els.logBtn.classList.toggle('on', open);
+    cfg.logOpen = open;
+    store.set('logOpen', open);
+    if (open) renderLog();
+  }
+
+  function openLog(cat) {
+    if (cat && cat !== activeTab) setTab(cat);
+    if (logEl && !logEl.classList.contains('open')) toggleLog(true);
+    else renderLog();
   }
 
   function buildPanel() {
     if (panel || !document.body) return;
     document.head.appendChild(el('style', { text: css }));
+    activeTab = log[cfg.logTab] ? cfg.logTab : 'emote';
 
-    // Header
+    /* -------- settings column (main) -------- */
     els.dot = el('span', { id: 'kcc-dot', class: cfg.enabled ? '' : 'off' });
-    const min = el('span', { id: 'kcc-min', text: cfg.minimized ? '+' : '–' });
+    els.logBtn = el('span', { id: 'kcc-logbtn', class: 'kcc-hbtn', text: '▤', title: 'Show removed-message log' });
+    const min = el('span', { id: 'kcc-min', class: 'kcc-hbtn', text: cfg.minimized ? '+' : '–' });
     const head = el('div', { id: 'kcc-head' }, [
       els.dot,
       el('span', { id: 'kcc-title', text: 'Chat Cleaner' }),
+      els.logBtn,
       min,
     ]);
 
-    // Toggles
     const on = toggleRow('kcc-enabled', 'Enabled', cfg.enabled);
     const emote = toggleRow('kcc-emote', 'Remove emote-only', cfg.hideEmoteOnly);
     const dupe = toggleRow('kcc-dupe', 'Remove duplicates', cfg.hideDuplicates);
@@ -319,45 +431,63 @@
       phrasesTa,
       el('div', { id: 'kcc-stats' }, [
         statCell('Scanned', 'seenN'),
-        statCell('Emote', 'emoteN'),
-        statCell('Dupes', 'dupeN'),
-        statCell('Phrase', 'phraseN'),
+        statCell('Emote', 'emoteN', 'emote'),
+        statCell('Dupes', 'dupeN', 'dupe'),
+        statCell('Phrase', 'phraseN', 'phrase'),
       ]),
     ]);
 
-    panel = el('div', { id: 'kcc-panel', class: cfg.minimized ? 'min' : '' }, [head, body]);
-    document.body.appendChild(panel);
+    mainEl = el('div', { id: 'kcc-main', class: cfg.minimized ? 'min' : '' }, [head, body]);
 
+    /* -------- slide-out log drawer -------- */
+    els.tabs = [];
+    const tabsWrap = el('div', { id: 'kcc-tabs' });
+    [['emote', 'Emote'], ['dupe', 'Dupes'], ['phrase', 'Phrase']].forEach(([cat, label]) => {
+      const t = el('div', { class: 'kcc-tab' + (cat === activeTab ? ' active' : ''), text: label });
+      t.addEventListener('click', () => setTab(cat));
+      els.tabs.push({ el: t, cat });
+      tabsWrap.appendChild(t);
+    });
+    const clearBtn = el('span', { id: 'kcc-log-clear', text: 'Clear' });
+    logListEl = el('div', { id: 'kcc-list' });
+    logEl = el('div', { id: 'kcc-log', class: cfg.logOpen ? 'open' : '' }, [
+      el('div', { id: 'kcc-log-head' }, [el('span', { id: 'kcc-log-title', text: 'Removed' }), clearBtn]),
+      tabsWrap,
+      logListEl,
+    ]);
+
+    panel = el('div', { id: 'kcc-panel' }, [logEl, mainEl]);
+    document.body.appendChild(panel);
+    if (cfg.logOpen) els.logBtn.classList.add('on');
+    renderLog();
+
+    // Position is on the root; size is on the settings column.
     if (cfg.panelX != null && cfg.panelY != null) {
       panel.style.left = cfg.panelX + 'px';
       panel.style.top = cfg.panelY + 'px';
       panel.style.right = 'auto';
     }
-    // Restore saved size (only apply the height when expanded — a collapsed
-    // panel sizes to its header).
-    if (cfg.panelW) panel.style.width = cfg.panelW + 'px';
-    if (cfg.panelH && !cfg.minimized) panel.style.height = cfg.panelH + 'px';
+    if (cfg.panelW) mainEl.style.width = cfg.panelW + 'px';
+    if (cfg.panelH && !cfg.minimized) mainEl.style.height = cfg.panelH + 'px';
 
-    // Persist size as the user drags the resize handle (debounced; skip the
-    // collapsed state so we don't overwrite the real height).
+    // Persist the settings column's size as it's resized (debounced; skip while
+    // collapsed so we don't overwrite the real height).
     let sizeTimer;
     const ro = new ResizeObserver(() => {
       clearTimeout(sizeTimer);
       sizeTimer = setTimeout(() => {
         if (cfg.minimized) return;
-        const r = panel.getBoundingClientRect();
+        const r = mainEl.getBoundingClientRect();
         cfg.panelW = Math.round(r.width);
         cfg.panelH = Math.round(r.height);
         store.set('panelW', cfg.panelW);
         store.set('panelH', cfg.panelH);
       }, 350);
     });
-    ro.observe(panel);
+    ro.observe(mainEl);
 
-    // Stack above EVERYTHING. Kick has its own high-z-index overlays, and when
-    // the panel renders under one, clicks land on Kick's element instead of our
-    // toggles. The browser "top layer" (popover) beats any z-index; fall back to
-    // a max z-index where the API is missing.
+    // Stack above EVERYTHING via the browser top layer (popover); Kick's own
+    // high-z-index overlays otherwise render over us and steal clicks.
     let usingPopover = false;
     try {
       if (typeof panel.showPopover === 'function') {
@@ -367,9 +497,8 @@
       }
     } catch (_) { usingPopover = false; }
 
-    // Survive the player going fullscreen/theater: a fullscreen element enters
-    // the top layer above us, so re-assert ourselves (re-show the popover, or
-    // move into the fullscreen element when popover isn't available).
+    // Survive the player going fullscreen/theater (its element enters the top
+    // layer above us): re-assert ourselves.
     document.addEventListener('fullscreenchange', () => {
       if (!panel) return;
       if (usingPopover) {
@@ -396,24 +525,26 @@
       store.set('phrasesText', cfg.phrasesText);
     });
 
+    els.logBtn.addEventListener('click', () => toggleLog());
+    clearBtn.addEventListener('click', () => { if (log[activeTab]) log[activeTab].length = 0; renderLog(); });
+
     min.addEventListener('click', () => {
       cfg.minimized = !cfg.minimized;
-      panel.classList.toggle('min', cfg.minimized);
+      mainEl.classList.toggle('min', cfg.minimized);
       min.textContent = cfg.minimized ? '+' : '–';
       store.set('minimized', cfg.minimized);
-      // Collapsed: let the panel shrink to its header. Expanded: restore height.
-      if (cfg.minimized) panel.style.height = 'auto';
-      else if (cfg.panelH) panel.style.height = cfg.panelH + 'px';
+      if (cfg.minimized) mainEl.style.height = 'auto';
+      else if (cfg.panelH) mainEl.style.height = cfg.panelH + 'px';
     });
 
-    makeDraggable(panel, head, min);
+    makeDraggable(panel, head);
     updatePanel();
   }
 
-  function makeDraggable(elm, handle, ignore) {
+  function makeDraggable(elm, handle) {
     let sx, sy, ox, oy, dragging = false;
     handle.addEventListener('mousedown', (e) => {
-      if (e.target === ignore) return;
+      if (e.target.closest && e.target.closest('.kcc-hbtn')) return;
       dragging = true;
       const r = elm.getBoundingClientRect();
       sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top;
@@ -464,5 +595,5 @@
     mk('hidePhrases', 'Remove custom phrases');
   }
 
-  console.log('[Kick Chat Cleaner] v0.3.2 active (WebSocket filter installed at document-start)');
+  console.log('[Kick Chat Cleaner] v0.4.0 active (WebSocket filter installed at document-start)');
 })();

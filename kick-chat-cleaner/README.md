@@ -10,7 +10,9 @@ Quiets down [kick.com](https://kick.com) chat by removing noise:
 
 A small GUI shows live counts of what's been removed and lets you toggle each
 behaviour. The panel is **draggable, resizable** (drag the bottom-right corner),
-and **collapsible** (the – / + in its header); its position and size persist.
+and **collapsible** (the – / + in its header); its position and size persist. A
+**slide-out log** (the ▤ button, or click any counter) lists exactly which
+messages were removed, tabbed by **Emote / Dupes / Phrase**.
 
 ## How it works (and why it's not a `display:none` script)
 
@@ -79,7 +81,7 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.3.2
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.0
    active` and the panel appears (top-right by default; drag it anywhere). The
    **Scanned** counter should start climbing as chat comes in — that confirms
    the filter is live.
@@ -102,6 +104,15 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.4.0
+- Added a **slide-out log of removed messages.** Click the ▤ button in the
+  header (or any of the counters) to slide out a drawer showing exactly what was
+  removed, tabbed by **Emote / Dupes / Phrase**, newest first, each with the
+  sender, the message (emotes shown as `:name:`), and a timestamp. **Clear**
+  empties the current tab. Open/closed state and the active tab persist.
+- The panel is now a container holding the settings column plus the drawer, so
+  the log slides out to the side without covering chat.
 
 ### 0.3.2
 - **Fixed the toggles not being clickable and the panel sometimes hiding behind
