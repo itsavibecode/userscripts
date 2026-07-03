@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Chat Cleaner
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.1
+// @version      0.4.2
 // @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible top-layer GUI with live counters and a slide-out log of what was removed.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -164,10 +164,12 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * Removal log (what got dropped, per category, newest first)          *
+   * Removal log — identical removals from the same user are collapsed    *
+   * into one entry with a count, most-recent activity first.            *
    * ------------------------------------------------------------------ */
-  const LOG_CAP = 250;
+  const LOG_CAP = 200; // distinct (user + message) entries kept per category
   const log = { emote: [], dupe: [], phrase: [] };
+  const logIx = { emote: new Map(), dupe: new Map(), phrase: new Map() };
 
   // [emote:id:name] -> :name: so the log is human-readable.
   function displayContent(content) {
@@ -175,13 +177,29 @@
   }
 
   function recordRemoval(cat, username, content) {
-    const list = log[cat];
-    if (!list) return;
+    const arr = log[cat], ix = logIx[cat];
+    if (!arr) return;
+    const u = String(username || '');
+    const t = displayContent(content);
+    const key = u.toLowerCase() + ' ' + t.toLowerCase();
     let hh = '', mm = '';
     try { const d = new Date(); hh = String(d.getHours()).padStart(2, '0'); mm = String(d.getMinutes()).padStart(2, '0'); } catch (_) {}
-    list.unshift({ u: String(username || ''), t: displayContent(content), time: hh + ':' + mm });
-    if (list.length > LOG_CAP) list.pop();
-    appendLogEntry(cat);
+    const time = hh + ':' + mm;
+
+    let e = ix.get(key);
+    if (e) {
+      // Seen before → bump the count and move it back to the top.
+      e.count++;
+      e.time = time;
+      const i = arr.indexOf(e);
+      if (i > 0) { arr.splice(i, 1); arr.unshift(e); }
+    } else {
+      e = { key, u, t, count: 1, time };
+      arr.unshift(e);
+      ix.set(key, e);
+      while (arr.length > LOG_CAP) { const dropped = arr.pop(); ix.delete(dropped.key); }
+    }
+    scheduleLogRender(cat);
   }
 
   /* ------------------------------------------------------------------ *
@@ -301,6 +319,8 @@
     .kcc-le { padding: 3px 0; border-bottom: 1px solid #1e1e26; word-break: break-word; font-size: 11px; }
     .kcc-le .u { color: #7db8ff; font-weight: 600; }
     .kcc-le .ts { opacity: .4; font-size: 10px; float: right; margin-left: 6px; }
+    .kcc-le .kcc-cnt { color: #ffb454; font-weight: 700; font-size: 10px; margin-left: 6px;
+      background: #2a230f; border-radius: 999px; padding: 0 5px; white-space: nowrap; }
     #kcc-empty { opacity: .5; text-align: center; padding: 18px 8px; font-size: 11px; }
   `;
 
@@ -339,11 +359,14 @@
    * Log drawer rendering                                                *
    * ------------------------------------------------------------------ */
   function logEntryNode(e) {
-    return el('div', { class: 'kcc-le' }, [
+    const kids = [
       el('span', { class: 'ts', text: e.time }),
       el('span', { class: 'u', text: e.u + ': ' }),
       el('span', { class: 'm', text: e.t }),
-    ]);
+    ];
+    // Count badge — how many times this exact message was removed.
+    if (e.count > 1) kids.push(el('span', { class: 'kcc-cnt', text: '×' + e.count }));
+    return el('div', { class: 'kcc-le' }, kids);
   }
 
   function renderLog() {
@@ -357,14 +380,15 @@
     for (let i = 0; i < arr.length; i++) logListEl.appendChild(logEntryNode(arr[i]));
   }
 
-  // Called from recordRemoval for every drop; cheaply prepends one row when the
-  // drawer is open on the matching tab (full re-render only happens on open).
-  function appendLogEntry(cat) {
+  // Called from recordRemoval for every drop. Entries are aggregated (with a
+  // count), so we re-render the current tab — coalesced so a fast chat doesn't
+  // rebuild the list on every single message.
+  let renderPending = false;
+  function scheduleLogRender(cat) {
     if (!logListEl || !logEl || !logEl.classList.contains('open') || cat !== activeTab) return;
-    const empty = logListEl.querySelector('#kcc-empty');
-    if (empty) empty.remove();
-    logListEl.insertBefore(logEntryNode(log[cat][0]), logListEl.firstChild);
-    while (logListEl.children.length > LOG_CAP) logListEl.removeChild(logListEl.lastChild);
+    if (renderPending) return;
+    renderPending = true;
+    setTimeout(() => { renderPending = false; renderLog(); }, 150);
   }
 
   function setTab(cat) {
@@ -527,7 +551,7 @@
     });
 
     els.logBtn.addEventListener('click', () => toggleLog());
-    clearBtn.addEventListener('click', () => { if (log[activeTab]) log[activeTab].length = 0; renderLog(); });
+    clearBtn.addEventListener('click', () => { if (log[activeTab]) { log[activeTab].length = 0; logIx[activeTab].clear(); } renderLog(); });
 
     min.addEventListener('click', () => {
       cfg.minimized = !cfg.minimized;
@@ -596,5 +620,5 @@
     mk('hidePhrases', 'Remove custom phrases');
   }
 
-  console.log('[Kick Chat Cleaner] v0.4.1 active (WebSocket filter installed at document-start)');
+  console.log('[Kick Chat Cleaner] v0.4.2 active (WebSocket filter installed at document-start)');
 })();

@@ -12,7 +12,8 @@ A small GUI shows live counts of what's been removed and lets you toggle each
 behaviour. The panel is **draggable, resizable** (drag the bottom-right corner),
 and **collapsible** (the – / + in its header); its position and size persist. A
 **slide-out log** (the ▤ button, or click any counter) lists exactly which
-messages were removed, tabbed by **Emote / Dupes / Phrase**.
+messages were removed, tabbed by **Emote / Dupes / Phrase**, with a `×N` count
+of how many times each identical message was removed.
 
 ## How it works (and why it's not a `display:none` script)
 
@@ -81,7 +82,7 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.1
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.2
    active` and the panel appears (top-right by default; drag it anywhere). The
    **Scanned** counter should start climbing as chat comes in — that confirms
    the filter is live.
@@ -104,6 +105,11 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.4.2
+- The removed-message log now **collapses repeats into one entry with a `×N`
+  count** instead of listing each occurrence separately, so you can see how many
+  times the same message (per user) was removed as a duplicate or emote.
 
 ### 0.4.1
 - **Per-user only** now defaults to **on**. Cross-user dedup was too aggressive as
