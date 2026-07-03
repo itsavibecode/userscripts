@@ -1,11 +1,12 @@
 # Kick Chat Cleaner
 
-Quiets down [kick.com](https://kick.com) chat by removing two kinds of noise:
+Quiets down [kick.com](https://kick.com) chat by removing noise:
 
 - **Emote-only messages** — anything whose whole body is just emotes with no
   actual text.
 - **Duplicate messages** — repeated/copypasta lines, keeping the **first**
   (original) occurrence and dropping the rest.
+- **Custom phrases** — messages containing any word or phrase on your blocklist.
 
 A small draggable GUI shows live counts of what's been removed and lets you
 toggle each behaviour.
@@ -40,6 +41,10 @@ renders them, and there's **no gap**.
 - **Duplicate** — build a signature from the normalized `content` and keep a
   rolling window of recent signatures. First occurrence is kept; later matches
   are dropped.
+- **Custom phrase** — build a searchable form of `content` (emote tokens reduced
+  to their name, lowercased) and drop the message if it contains any phrase on
+  your list. Matching is a case-insensitive substring, so `gamble` also catches
+  `gambling` and `kekw` catches the KEKW emote.
 
 Any frame that can't be parsed is always passed through untouched, so chat can
 never break — the worst case is that filtering silently stops.
@@ -52,10 +57,11 @@ page):
 | Setting | Default | Effect |
 | --- | --- | --- |
 | Enabled | on | Master switch for all filtering. |
-| Hide emote-only | on | Drop messages that are only emotes. |
-| Hide duplicates | on | Drop repeats, keeping the original. |
+| Remove emote-only | on | Drop messages that are only emotes. |
+| Remove duplicates | on | Drop repeats, keeping the original. |
 | Per-user only | **off** | Off = copypasta from *different* users also collapses (classic spam dedupe). On = only a single user repeating themselves collapses. |
 | Duplicate memory | 200 | How many recent kept messages to remember when checking for duplicates. |
+| Remove custom phrases | off | Drop messages containing any phrase from the box below (one per line). |
 
 **A note on the duplicate default.** With *Per-user only* off, the cleaner
 removes any message whose text has already appeared recently — including short
@@ -72,8 +78,14 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.2.0
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.3.0
    active` and the panel appears (top-right by default; drag it anywhere).
+
+**Updating from an older version:** Tampermonkey → installed scripts → Kick
+Chat Cleaner → **Settings** → *Check for userscript updates*, or just reinstall
+from the Raw link above. (v0.1.0 had no GUI and used a DOM-hiding approach that
+didn't work on Kick's virtualized chat — if you don't see the panel, you're
+still on it.)
 
 Note: messages already in chat when the page loads (the initial backlog) are
 loaded over HTTP, not the live socket, so they aren't filtered — only messages
@@ -87,6 +99,14 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.3.0
+- Added a **custom phrase blocklist** — a box in the panel (one phrase per
+  line); any message containing a listed phrase is dropped. Case-insensitive
+  substring match, and emotes are matched by name.
+- Renamed the toggles to "Remove …" and rebuilt the panel with a phrase box and
+  a third live counter. GUI now builds through a small `el()` helper (no
+  `innerHTML`), verified rendering on a live channel.
 
 ### 0.2.0
 - **Rewritten to filter at the WebSocket layer instead of hiding DOM nodes.**
