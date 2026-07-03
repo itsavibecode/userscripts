@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Chat Cleaner
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.3
+// @version      0.4.4
 // @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible top-layer GUI with live counters and a slide-out log of what was removed.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -304,7 +304,9 @@
     #kcc-log { order: 1; width: 0; overflow: hidden; transition: width .2s ease;
       background: #16161b; border: 1px solid #2a2a33; border-radius: 10px;
       box-shadow: 0 8px 28px rgba(0,0,0,.45); display: flex; flex-direction: column; max-height: 82vh; }
-    #kcc-log:not(.open) { border-color: transparent; box-shadow: none; }
+    /* Closed: collapse to nothing (0x0, no border) so it neither draws a thin
+       line nor leaves an invisible click-blocking box over the video. */
+    #kcc-log:not(.open) { width: 0; height: 0; border: 0; box-shadow: none; margin: 0; }
     #kcc-log.open { width: 292px; margin-right: 8px; }
     #kcc-log-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
       border-bottom: 1px solid #2a2a33; flex: 0 0 auto; white-space: nowrap; }
@@ -637,5 +639,5 @@
     mk('hidePhrases', 'Remove custom phrases');
   }
 
-  console.log('[Kick Chat Cleaner] v0.4.3 active (WebSocket filter installed at document-start)');
+  console.log('[Kick Chat Cleaner] v0.4.4 active (WebSocket filter installed at document-start)');
 })();

@@ -82,7 +82,7 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.3
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.4
    active` and the panel appears (top-right by default; drag it anywhere). The
    **Scanned** counter should start climbing as chat comes in — that confirms
    the filter is live.
@@ -105,6 +105,13 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.4.4
+- Fixed a thin vertical line left over next to the panel after closing the log
+  and minimizing. The closed log drawer was collapsing to 0 width but keeping a
+  1px transparent border over its dark background (and its full height), leaving
+  a hairline bar — and an invisible click-blocking box over the video. Closed, it
+  now collapses to a true 0×0.
 
 ### 0.4.3
 - **Coexist with other Kick extensions** (e.g. *Mo'Kick*). When another extension
