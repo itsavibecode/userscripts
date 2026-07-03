@@ -79,8 +79,10 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.3.1
-   active` and the panel appears (top-right by default; drag it anywhere).
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.3.2
+   active` and the panel appears (top-right by default; drag it anywhere). The
+   **Scanned** counter should start climbing as chat comes in — that confirms
+   the filter is live.
 
 **Updating from an older version:** Tampermonkey → installed scripts → Kick
 Chat Cleaner → **Settings** → *Check for userscript updates*, or just reinstall
@@ -100,6 +102,20 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.3.2
+- **Fixed the toggles not being clickable and the panel sometimes hiding behind
+  Kick's UI** — the two were the same problem: the panel could render under one
+  of Kick's high-`z-index` overlays, so clicks landed on Kick's element instead
+  of the switches. The panel now renders in the browser **top layer** (via the
+  popover API, with a max-`z-index` fallback) so it sits above everything and
+  stays clickable, and it re-asserts itself when the player goes
+  fullscreen/theater. Each toggle's whole row is now a `<label>`, so clicking
+  the switch itself works, not just the text.
+- Added a live **Scanned** counter so you can see the filter working as soon as
+  chat arrives, even before anything is removed.
+- Fixed the default panel position (an `inset` ordering bug had let it drift to
+  the top-left); it anchors top-right again.
 
 ### 0.3.1
 - Panel is now **resizable** (drag the bottom-right corner) with the size saved

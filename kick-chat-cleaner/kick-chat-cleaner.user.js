@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Chat Cleaner
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.1
-// @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible GUI with live counters.
+// @version      0.3.2
+// @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible top-layer GUI with live counters.
 // @author       itsavibecode
 // @match        https://kick.com/*
 // @run-at       document-start
@@ -150,6 +150,7 @@
     if (!payload || typeof payload.content !== 'string') return false;
 
     stats.seenChat++;
+    updatePanel();
     const content = payload.content;
     const username = payload.sender && payload.sender.username;
 
@@ -204,12 +205,15 @@
   const els = {};
 
   const css = `
-    #kcc-panel { position: fixed; z-index: 2147483000; top: 96px; right: 16px;
+    #kcc-panel { position: fixed; z-index: 2147483647; inset: auto; margin: 0; padding: 0;
+      top: 96px; right: 16px;
       width: 226px; font: 12px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
       color: #e9e9ee; background: #16161b; border: 1px solid #2a2a33;
       border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45);
       display: flex; flex-direction: column; overflow: hidden;
       resize: both; min-width: 190px; min-height: 88px; max-width: 560px; max-height: 92vh; }
+    #kcc-panel:popover-open { display: flex; }
+    #kcc-panel::backdrop { background: transparent; }
     #kcc-panel.min { resize: none; min-height: 0; height: auto !important; }
     #kcc-panel * { box-sizing: border-box; }
     #kcc-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
@@ -220,9 +224,10 @@
     #kcc-min { cursor: pointer; opacity: .7; padding: 0 4px; font-size: 14px; }
     #kcc-min:hover { opacity: 1; }
     #kcc-body { padding: 8px 10px 10px; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
-    .kcc-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; }
-    .kcc-row label { cursor: pointer; user-select: none; }
-    .kcc-sw { position: relative; width: 32px; height: 18px; flex: 0 0 auto; }
+    .kcc-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; }
+    .kcc-toggle { cursor: pointer; user-select: none; }
+    .kcc-txt { flex: 1 1 auto; }
+    .kcc-sw { position: relative; width: 32px; height: 18px; flex: 0 0 auto; cursor: pointer; }
     .kcc-sw input { opacity: 0; width: 0; height: 0; }
     .kcc-sl { position: absolute; inset: 0; background: #3a3a44; border-radius: 999px; transition: .15s; cursor: pointer; }
     .kcc-sl::before { content: ""; position: absolute; height: 14px; width: 14px; left: 2px; top: 2px;
@@ -230,7 +235,7 @@
     .kcc-sw input:checked + .kcc-sl { background: #53a2ff; }
     .kcc-sw input:checked + .kcc-sl::before { transform: translateX(14px); }
     .kcc-sub { padding-left: 12px; opacity: .95; }
-    .kcc-sub label { font-size: 11px; }
+    .kcc-sub .kcc-txt, .kcc-sub label { font-size: 11px; }
     .kcc-num { width: 58px; background: #23232b; border: 1px solid #3a3a44; color: #e9e9ee;
       border-radius: 5px; padding: 2px 4px; font: inherit; }
     #kcc-phrases { width: 100%; height: 58px; resize: vertical; margin-top: 4px;
@@ -262,8 +267,10 @@
     inp.checked = !!checked;
     const sl = el('span', { class: 'kcc-sl' });
     const sw = el('span', { class: 'kcc-sw' }, [inp, sl]);
-    const lab = el('label', { text: label, for: id });
-    const row = el('div', { class: 'kcc-row' + (sub ? ' kcc-sub' : '') }, [lab, sw]);
+    const txt = el('span', { class: 'kcc-txt', text: label });
+    // The whole row is a <label for=id>, so a click anywhere on it — the text
+    // OR the switch — toggles the checkbox.
+    const row = el('label', { class: 'kcc-row kcc-toggle' + (sub ? ' kcc-sub' : ''), for: id }, [txt, sw]);
     return { row, inp };
   }
 
@@ -311,6 +318,7 @@
       phraseTog.row,
       phrasesTa,
       el('div', { id: 'kcc-stats' }, [
+        statCell('Scanned', 'seenN'),
         statCell('Emote', 'emoteN'),
         statCell('Dupes', 'dupeN'),
         statCell('Phrase', 'phraseN'),
@@ -345,6 +353,32 @@
       }, 350);
     });
     ro.observe(panel);
+
+    // Stack above EVERYTHING. Kick has its own high-z-index overlays, and when
+    // the panel renders under one, clicks land on Kick's element instead of our
+    // toggles. The browser "top layer" (popover) beats any z-index; fall back to
+    // a max z-index where the API is missing.
+    let usingPopover = false;
+    try {
+      if (typeof panel.showPopover === 'function') {
+        panel.setAttribute('popover', 'manual');
+        panel.showPopover();
+        usingPopover = true;
+      }
+    } catch (_) { usingPopover = false; }
+
+    // Survive the player going fullscreen/theater: a fullscreen element enters
+    // the top layer above us, so re-assert ourselves (re-show the popover, or
+    // move into the fullscreen element when popover isn't available).
+    document.addEventListener('fullscreenchange', () => {
+      if (!panel) return;
+      if (usingPopover) {
+        try { panel.hidePopover(); panel.showPopover(); } catch (_) {}
+      } else {
+        const host = document.fullscreenElement || document.body;
+        if (panel.parentElement !== host) host.appendChild(panel);
+      }
+    });
 
     // Wiring
     on.inp.addEventListener('change', () => { cfg.enabled = on.inp.checked; store.set('enabled', cfg.enabled); els.dot.classList.toggle('off', !cfg.enabled); });
@@ -404,6 +438,7 @@
 
   function updatePanel() {
     if (!els.emoteN) return;
+    if (els.seenN) els.seenN.textContent = stats.seenChat;
     els.emoteN.textContent = stats.emote;
     els.dupeN.textContent = stats.dupe;
     els.phraseN.textContent = stats.phrase;
@@ -429,5 +464,5 @@
     mk('hidePhrases', 'Remove custom phrases');
   }
 
-  console.log('[Kick Chat Cleaner] v0.3.1 active (WebSocket filter installed at document-start)');
+  console.log('[Kick Chat Cleaner] v0.3.2 active (WebSocket filter installed at document-start)');
 })();
