@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Chat Cleaner
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.2
+// @version      0.4.3
 // @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible top-layer GUI with live counters and a slide-out log of what was removed.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -513,25 +513,42 @@
 
     // Stack above EVERYTHING via the browser top layer (popover); Kick's own
     // high-z-index overlays otherwise render over us and steal clicks.
-    let usingPopover = false;
+    let popoverMode = false;
     try {
       if (typeof panel.showPopover === 'function') {
         panel.setAttribute('popover', 'manual');
         panel.showPopover();
-        usingPopover = true;
+        popoverMode = true;
       }
-    } catch (_) { usingPopover = false; }
+    } catch (_) { popoverMode = false; }
 
-    // Survive the player going fullscreen/theater (its element enters the top
-    // layer above us): re-assert ourselves.
+    // Self-heal. Other Kick extensions (e.g. "Mo'Kick") and Kick's own SPA
+    // re-renders can remove our node from the DOM or close the popover, which
+    // makes the panel flash and vanish. Re-mount it whenever that happens; if
+    // the popover keeps getting closed, fall back to a plain max-z-index element
+    // (still visible, just not in the browser top layer).
+    let healFails = 0;
+    function mountPanel() {
+      if (!panel) return;
+      const host = document.fullscreenElement || document.body;
+      if (panel.parentElement !== host) { try { host.appendChild(panel); } catch (_) {} }
+      if (popoverMode && !panel.matches(':popover-open')) {
+        try { panel.showPopover(); healFails = 0; }
+        catch (_) { if (++healFails >= 3) { popoverMode = false; try { panel.removeAttribute('popover'); } catch (__) {} } }
+      }
+    }
+    try {
+      new MutationObserver(() => { if (panel && !panel.isConnected) mountPanel(); })
+        .observe(document.body, { childList: true });
+    } catch (_) {}
+    setInterval(mountPanel, 1000);
+
+    // Re-assert above the player when it enters fullscreen/theater (its element
+    // enters the top layer above us).
     document.addEventListener('fullscreenchange', () => {
       if (!panel) return;
-      if (usingPopover) {
-        try { panel.hidePopover(); panel.showPopover(); } catch (_) {}
-      } else {
-        const host = document.fullscreenElement || document.body;
-        if (panel.parentElement !== host) host.appendChild(panel);
-      }
+      if (popoverMode) { try { panel.hidePopover(); } catch (_) {} }
+      mountPanel();
     });
 
     // Wiring
@@ -620,5 +637,5 @@
     mk('hidePhrases', 'Remove custom phrases');
   }
 
-  console.log('[Kick Chat Cleaner] v0.4.2 active (WebSocket filter installed at document-start)');
+  console.log('[Kick Chat Cleaner] v0.4.3 active (WebSocket filter installed at document-start)');
 })();

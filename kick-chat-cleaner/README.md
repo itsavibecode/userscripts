@@ -82,7 +82,7 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.2
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.3
    active` and the panel appears (top-right by default; drag it anywhere). The
    **Scanned** counter should start climbing as chat comes in — that confirms
    the filter is live.
@@ -105,6 +105,14 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.4.3
+- **Coexist with other Kick extensions** (e.g. *Mo'Kick*). When another extension
+  or Kick's own SPA re-rendered the page it could remove the panel's node or
+  close its top-layer popover, so the panel would flash and vanish. The panel now
+  self-heals — a `MutationObserver` plus a 1s check re-mounts it and re-opens the
+  popover whenever that happens, and if the popover keeps getting closed it falls
+  back to a plain max-`z-index` element so it stays visible.
 
 ### 0.4.2
 - The removed-message log now **collapses repeats into one entry with a `×N`
