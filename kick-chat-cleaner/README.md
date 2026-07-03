@@ -62,15 +62,15 @@ page):
 | Enabled | on | Master switch for all filtering. |
 | Remove emote-only | on | Drop messages that are only emotes. |
 | Remove duplicates | on | Drop repeats, keeping the original. |
-| Per-user only | **off** | Off = copypasta from *different* users also collapses (classic spam dedupe). On = only a single user repeating themselves collapses. |
+| Per-user only | **on** | On = only a single user repeating *themselves* collapses (the intuitive default). Off = copypasta from *different* users also collapses (aggressive spam dedupe). |
 | Duplicate memory | 200 | How many recent kept messages to remember when checking for duplicates. |
 | Remove custom phrases | off | Drop messages containing any phrase from the box below (one per line). |
 
-**A note on the duplicate default.** With *Per-user only* off, the cleaner
-removes any message whose text has already appeared recently — including short
-reactions like `no`, `yes`, or `W` typed by different people. On a fast channel
-that can remove a noticeable share of chat. If that feels too aggressive, turn
-**Per-user only** on so it only collapses a single user repeating themselves.
+**A note on the duplicate default.** *Per-user only* is **on** by default, so the
+cleaner only collapses a single user repeating *themselves* — it won't touch
+short reactions like `no`, `yes`, or `W` that different people happen to type. If
+you'd rather aggressively squash copypasta trains across *all* users (at the cost
+of also removing those incidental repeats), turn **Per-user only** off.
 
 Emoji typed as normal Unicode (😂) count as text and are **not** removed — only
 Kick's `[emote:…]` emotes do.
@@ -81,7 +81,7 @@ Kick's `[emote:…]` emotes do.
 2. Open
    [`kick-chat-cleaner.user.js`](./kick-chat-cleaner.user.js) on GitHub and
    click **Raw** — Tampermonkey shows an install prompt.
-3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.0
+3. Reload a kick.com channel. The console logs `[Kick Chat Cleaner] v0.4.1
    active` and the panel appears (top-right by default; drag it anywhere). The
    **Scanned** counter should start climbing as chat comes in — that confirms
    the filter is live.
@@ -104,6 +104,12 @@ Open DevTools (F12) → Console to confirm the `v0.2.0 active` line, and watch t
 panel's counters to see whether frames are being matched.
 
 ## Changelog
+
+### 0.4.1
+- **Per-user only** now defaults to **on**. Cross-user dedup was too aggressive as
+  a default — it collapsed common short reactions (`no`, `yes`, `W`) typed by
+  different people. The default now only collapses a user repeating themselves;
+  flip it off for the aggressive cross-user copypasta dedupe.
 
 ### 0.4.0
 - Added a **slide-out log of removed messages.** Click the ▤ button in the

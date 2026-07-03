@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Chat Cleaner
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.0
+// @version      0.4.1
 // @description  Remove emote-only messages, duplicate messages (keeping the original), and messages matching custom phrases from kick.com chat. Filtered at the WebSocket layer so nothing leaves a gap. Draggable, resizable, collapsible top-layer GUI with live counters and a slide-out log of what was removed.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -51,9 +51,10 @@
     enabled:           store.get('enabled', true),
     hideEmoteOnly:     store.get('hideEmoteOnly', true),
     hideDuplicates:    store.get('hideDuplicates', true),
-    // false -> copypasta from different users also collapses (spam dedupe)
-    // true  -> only the same user repeating themselves collapses
-    duplicatesPerUser: store.get('duplicatesPerUser', false),
+    // true  -> only the same user repeating themselves collapses (default; matches
+    //          the intuitive meaning of "duplicate" without nuking short reactions)
+    // false -> copypasta from different users also collapses (aggressive spam dedupe)
+    duplicatesPerUser: store.get('duplicatesPerUser', true),
     // How many recent kept messages to remember for duplicate checks.
     duplicateWindow:   store.get('duplicateWindow', 200),
     // Custom phrase blocklist.
@@ -595,5 +596,5 @@
     mk('hidePhrases', 'Remove custom phrases');
   }
 
-  console.log('[Kick Chat Cleaner] v0.4.0 active (WebSocket filter installed at document-start)');
+  console.log('[Kick Chat Cleaner] v0.4.1 active (WebSocket filter installed at document-start)');
 })();
