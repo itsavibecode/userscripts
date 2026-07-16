@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.26.0
+// @version      0.27.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -531,6 +531,9 @@
       .kac-row input[type=text],.kac-row input[type=number],.kac-row select{background:#17171c;border:1px solid #2a2a30;
         color:#e7e7ea;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
       .kac-div{height:1px;background:#2a2a30;margin:3px 0 1px}
+      /* Side by side when there's width, stacking automatically when there isn't. */
+      .kac-groups{display:flex;gap:8px;flex-wrap:wrap}
+      .kac-groups .kac-group{flex:1 1 250px;min-width:0}
       .kac-group{border-radius:8px;padding:5px 6px;border:1px solid}
       .kac-g-head{display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-bottom:3px}
       .kac-g-title{flex:0 0 auto;font-size:9px;font-weight:700;letter-spacing:.4px;white-space:nowrap}
@@ -568,6 +571,8 @@
       .kac-checks .kac-check{flex:0 1 auto}
       .kac-inline{display:flex;align-items:center;gap:6px}
       .kac-inline .kac-inat{flex:1 1 auto;min-width:0;max-width:240px}
+      .kac-inline-lbl{flex:0 0 auto;display:flex;align-items:center;gap:4px;
+        color:#9a9aa3;font-size:11px;cursor:help;white-space:nowrap}
       .kac-btns{display:flex;gap:8px;margin-top:2px}
       /* flex:1 only makes sense inside .kac-btns (a row). A .kac-btn placed
          directly in the body (a COLUMN) would grow to fill all leftover height. */
@@ -595,7 +600,6 @@
       #kac-explain-body{margin-top:4px;color:#cbb894}
       #kac-explain-body.hidden{display:none}
       #kac-explain-body div{padding:1px 0}
-      #kac-foot{flex:0 0 auto;font-size:9.5px;color:#5a5a63;text-align:right;padding-right:14px;cursor:default}
       #kac-resize{position:absolute;right:2px;bottom:2px;width:15px;height:15px;cursor:nwse-resize;
         background:
           linear-gradient(135deg,transparent 0 48%,#5a5a63 48% 56%,transparent 56% 70%,#5a5a63 70% 78%,transparent 78%);
@@ -632,9 +636,18 @@
               title="The exact text sent to chat each time. Default is Cx. Changes save automatically and apply to the next send." />
           </div>
         </div>
-        <label class="kac-check"
-          title="When on: (1) each send waits a RANDOM whole number of seconds between the Min and Max of each coloured group below, re-rolled every cycle; and (2) rotation keywords are sent in RANDOM order, never the same one twice in a row. Makes the bot look less robotic.">
-          <input type="checkbox" id="kac-rand" /> Randomize timing &amp; keyword order</label>
+        <div class="kac-checks">
+          <label class="kac-check"
+            title="Randomize timing &amp; keyword order. When on: (1) each send waits a RANDOM whole number of seconds between the Min and Max of each coloured group below, re-rolled every cycle; and (2) rotation keywords are sent in RANDOM order, never the same one twice in a row. Makes the bot look less robotic.">
+            <input type="checkbox" id="kac-rand" /> Randomize</label>
+          <label class="kac-check"
+            title="Kick rejects an identical message sent twice in a row ('you already sent this message'). When on, the script appends 0-5 invisible zero-width characters that cycle each send, so repeated text like Cx still posts, and the rotation keywords field becomes active. Recommended ON.">
+            <input type="checkbox" id="kac-dup" /> Anti-duplicate</label>
+          <label class="kac-check"
+            title="A SECOND message on its own long timer (e.g. a bot command like !claim every 4 hours), running alongside the main spammer. When both are due at the same moment, this one takes priority and the main message is held back by the cooldown. Sent EXACTLY as typed (no rotation, no anti-duplicate char) so commands are recognized.">
+            <input type="checkbox" id="kac-sec-en" /> Scheduled message</label>
+        </div>
+        <div class="kac-groups">
         <div class="kac-group kac-g-int"
           title="INTERVAL group — how often it sends. Each row's minutes and seconds boxes ADD TOGETHER (2m + 32s = 2m 32s). The green readout above shows exactly what the script understands.">
           <div class="kac-g-head">
@@ -683,13 +696,6 @@
             </span>
           </div>
         </div>
-        <div class="kac-checks">
-          <label class="kac-check"
-            title="Kick rejects an identical message sent twice in a row ('you already sent this message'). When on, the script appends 0-5 invisible zero-width characters that cycle each send, so repeated text like Cx still posts, and the rotation field below becomes active. Recommended ON.">
-            <input type="checkbox" id="kac-dup" /> Anti-duplicate</label>
-          <label class="kac-check"
-            title="A SECOND message on its own long timer (e.g. a bot command like !claim every 4 hours), running alongside the main spammer. When both are due at the same moment, this one takes priority and the main message is held back by the cooldown. Sent EXACTLY as typed (no rotation, no anti-duplicate char) so commands are recognized.">
-            <input type="checkbox" id="kac-sec-en" /> Scheduled message (priority)</label>
         </div>
         <div class="kac-row" id="kac-rotate-row">
           <label title="Extra messages to cycle through, separated by commas. The Message above is always first, then each keyword in turn, then it loops. Example: KEKW, LULW, Cx W. Whitespace around commas is trimmed; blank entries are ignored. Only used while Anti-duplicate is on.">Rotation keywords (comma-separated) <span class="kac-q">?</span></label>
@@ -718,17 +724,16 @@
             title="Countdown to the next scheduled send, and how many have been sent this session."></div>
         </div>
         <div class="kac-div"></div>
-        <div class="kac-row">
-          <label title="The mention watcher reads the on-page chat for messages that mention or reply to your username and logs them to the Mentions tab. Read-only — it never sends or replies. It is INDEPENDENT of the main Start button and works even when the auto-sender is stopped.">Mention watcher — your Kick username <span class="kac-q">?</span></label>
-          <div class="kac-inline">
-            <div class="kac-inat" title="Type your username without the @ — the @ is added automatically.">
-              <span>@</span>
-              <input type="text" id="kac-watch-user" placeholder="your_kick_name"
-                title="Type your exact Kick username WITHOUT the @ (it's shown for you). The watcher flags any chat message containing @thisname or a reply to it." />
-            </div>
-            <button class="kac-btn kac-btn-w" id="kac-watch-btn"
-              title="Start / stop watching chat for @mentions and replies to your username. INDEPENDENT of the main Start button — it works even when the auto-sender is stopped. Matches appear in the Mentions tab.">Start watching</button>
+        <div class="kac-inline">
+          <label class="kac-inline-lbl"
+            title="The mention watcher reads the on-page chat for messages that mention or reply to your username and logs them to the Mentions tab. Read-only — it never sends or replies. It is INDEPENDENT of the main Start button and works even when the auto-sender is stopped.">Mention watcher <span class="kac-q">?</span></label>
+          <div class="kac-inat" title="Type your Kick username without the @ — the @ is added automatically.">
+            <span>@</span>
+            <input type="text" id="kac-watch-user" placeholder="your_kick_name"
+              title="Type your exact Kick username WITHOUT the @ (it's shown for you). The watcher flags any chat message containing @thisname or a reply to it." />
           </div>
+          <button class="kac-btn kac-btn-w" id="kac-watch-btn"
+            title="Start / stop watching chat for @mentions and replies to your username. INDEPENDENT of the main Start button — it works even when the auto-sender is stopped. Matches appear in the Mentions tab.">Start watching</button>
         </div>
         <div id="kac-watch-status"
           title="Whether the mention watcher is active, and how many mentions it has caught this session."></div>
@@ -748,16 +753,6 @@
           </div>
           <div id="kac-explain-body"></div>
         </div>
-        <div class="kac-div"></div>
-        <div class="kac-btns">
-          <button class="kac-btn kac-btn-sm" id="kac-export"
-            title="Save every setting (target, messages, timings, keywords, scheduled message, watcher, webhook) to a .json file you can keep as a backup. NOTE: the file includes your webhook URL — keep it private.">Backup settings</button>
-          <button class="kac-btn kac-btn-sm" id="kac-import"
-            title="Load a previously saved .json backup and apply it. Sending is left stopped afterwards so nothing fires unexpectedly — press Start when ready.">Restore</button>
-        </div>
-        <input type="file" id="kac-import-file" accept="application/json,.json" style="display:none" />
-        <div id="kac-foot"
-          title="Installed script version. Update via Tampermonkey - Check for userscript updates.">v<span id="kac-ver">?</span></div>
       </div>
       <div id="kac-resize" title="Drag the corner to resize the controls (taller also makes the log taller)."></div>
       </div>
@@ -809,6 +804,15 @@
               </div>
             </div>
           </div>
+          <div class="kac-div"></div>
+          <div class="kac-set-h">BACKUP</div>
+          <div class="kac-btns">
+            <button class="kac-btn kac-btn-sm" id="kac-export"
+              title="Save every setting (target, messages, timings, keywords, scheduled message, watcher, webhook) to a .json file you can keep as a backup. NOTE: the file includes your webhook URL — keep it private. Mentions are not included.">Backup settings</button>
+            <button class="kac-btn kac-btn-sm" id="kac-import"
+              title="Load a previously saved .json backup and apply it. Sending is left stopped afterwards so nothing fires unexpectedly — press Start when ready.">Restore</button>
+          </div>
+          <input type="file" id="kac-import-file" accept="application/json,.json" style="display:none" />
         </div>
       </div>
     `;
@@ -881,9 +885,7 @@
       resize: p.querySelector('#kac-resize'),
     };
 
-    // Show the running version in the footer and the title bar.
-    const verEl = p.querySelector('#kac-ver');
-    if (verEl) verEl.textContent = VERSION;
+    // The title bar carries the running version.
     ui.titleEl.textContent = TITLE;
 
     applySettingsToUI();
