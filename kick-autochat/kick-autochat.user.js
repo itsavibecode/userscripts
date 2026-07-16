@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.24.0
+// @version      0.25.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -541,7 +541,8 @@
          letting the whole max half hide as one unit. */
       .kac-mm-max{display:contents}
       .kac-mm-max.hidden{display:none}
-      .kac-mmss input[type=number]{flex:1 1 0;min-width:0;box-sizing:border-box;
+      /* Capped so a wide panel doesn't turn these into giant boxes. */
+      .kac-mmss input[type=number]{flex:0 1 56px;max-width:56px;min-width:0;box-sizing:border-box;
         background:#17171c;border:1px solid #2a2a30;color:#e7e7ea;border-radius:5px;
         padding:4px 2px;font:inherit;font-size:11px;text-align:center;
         appearance:textfield;-moz-appearance:textfield}
@@ -557,8 +558,16 @@
       .kac-grid{display:flex;gap:8px}
       .kac-grid .kac-row{flex:1}
       .kac-check{display:flex;align-items:center;gap:6px;color:#cfcfd6;cursor:pointer}
+      .kac-checks{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+      .kac-checks .kac-check{flex:0 1 auto}
+      .kac-inline{display:flex;align-items:center;gap:6px}
+      .kac-inline .kac-inat{flex:1 1 auto;min-width:0;max-width:240px}
       .kac-btns{display:flex;gap:8px;margin-top:2px}
-      .kac-btn{flex:1;border:none;border-radius:7px;padding:8px;font:inherit;font-weight:700;cursor:pointer}
+      /* flex:1 only makes sense inside .kac-btns (a row). A .kac-btn placed
+         directly in the body (a COLUMN) would grow to fill all leftover height. */
+      .kac-btns .kac-btn{flex:1}
+      .kac-btn{flex:0 0 auto;border:none;border-radius:7px;padding:8px;font:inherit;font-weight:700;cursor:pointer}
+      .kac-btn-w{flex:0 0 auto;width:118px;padding:7px 8px;font-size:11px}
       #kac-toggle.start{background:#53fc18;color:#0a0a0a}
       #kac-toggle.stop{background:#ff4757;color:#fff}
       #kac-now{background:#2a2a30;color:#e7e7ea}
@@ -605,15 +614,17 @@
         <button id="kac-collapse" title="Collapse / expand the panel. State is remembered.">_</button>
       </div>
       <div id="kac-body">
-        <div class="kac-row">
-          <label title="The bot ONLY sends on kick.com/<this username>. On any other channel or tab it shows Paused and posts nothing. You can type a username, an @handle, or paste a full kick.com URL.">Target channel <span class="kac-q">?</span></label>
-          <input type="text" id="kac-target" placeholder="iceposeidon"
-            title="Only auto-send on this Kick channel. Example: iceposeidon. Navigate to a different streamer and the bot pauses automatically — it will not chat there." />
-        </div>
-        <div class="kac-row">
-          <label title="The exact text sent to chat each time. Default is Cx. Changes are saved automatically and used on the next send.">Message <span class="kac-q">?</span></label>
-          <input type="text" id="kac-msg"
-            title="The exact text sent to chat each time. Default is Cx. Changes save automatically and apply to the next send." />
+        <div class="kac-grid">
+          <div class="kac-row">
+            <label title="The bot ONLY sends on kick.com/<this username>. On any other channel or tab it shows Paused and posts nothing. You can type a username, an @handle, or paste a full kick.com URL.">Target channel <span class="kac-q">?</span></label>
+            <input type="text" id="kac-target" placeholder="iceposeidon"
+              title="Only auto-send on this Kick channel. Example: iceposeidon. Navigate to a different streamer and the bot pauses automatically — it will not chat there." />
+          </div>
+          <div class="kac-row">
+            <label title="The exact text sent to chat each time. Default is Cx. Changes are saved automatically and used on the next send.">Message <span class="kac-q">?</span></label>
+            <input type="text" id="kac-msg"
+              title="The exact text sent to chat each time. Default is Cx. Changes save automatically and apply to the next send." />
+          </div>
         </div>
         <label class="kac-check"
           title="When on: (1) each send waits a RANDOM whole number of seconds between the Min and Max of each coloured group below, re-rolled every cycle; and (2) rotation keywords are sent in RANDOM order, never the same one twice in a row. Makes the bot look less robotic.">
@@ -666,18 +677,19 @@
             </span>
           </div>
         </div>
-        <label class="kac-check"
-          title="Kick rejects an identical message sent twice in a row ('you already sent this message'). When on, the script appends 0-5 invisible zero-width characters that cycle each send, so repeated text like Cx still posts, and the rotation field below becomes active. Recommended ON.">
-          <input type="checkbox" id="kac-dup" /> Anti-duplicate (avoid Kick's repeat filter)</label>
+        <div class="kac-checks">
+          <label class="kac-check"
+            title="Kick rejects an identical message sent twice in a row ('you already sent this message'). When on, the script appends 0-5 invisible zero-width characters that cycle each send, so repeated text like Cx still posts, and the rotation field below becomes active. Recommended ON.">
+            <input type="checkbox" id="kac-dup" /> Anti-duplicate</label>
+          <label class="kac-check"
+            title="A SECOND message on its own long timer (e.g. a bot command like !claim every 4 hours), running alongside the main spammer. When both are due at the same moment, this one takes priority and the main message is held back by the cooldown. Sent EXACTLY as typed (no rotation, no anti-duplicate char) so commands are recognized.">
+            <input type="checkbox" id="kac-sec-en" /> Scheduled message (priority)</label>
+        </div>
         <div class="kac-row" id="kac-rotate-row">
           <label title="Extra messages to cycle through, separated by commas. The Message above is always first, then each keyword in turn, then it loops. Example: KEKW, LULW, Cx W. Whitespace around commas is trimmed; blank entries are ignored. Only used while Anti-duplicate is on.">Rotation keywords (comma-separated) <span class="kac-q">?</span></label>
           <input type="text" id="kac-rotate" placeholder="e.g. KEKW, LULW, Cx W"
             title="Comma-separated list of additional messages. Sends cycle: Message, then each keyword, then loop. Leave empty to just send the Message. Only active while Anti-duplicate is checked." />
         </div>
-        <div class="kac-div"></div>
-        <label class="kac-check"
-          title="A SECOND message on its own long timer (e.g. a bot command like !claim every 4 hours), running alongside the main spammer. When both are due at the same moment, this one takes priority and the main message is held back by the cooldown. Sent EXACTLY as typed (no rotation, no anti-duplicate char) so commands are recognized.">
-          <input type="checkbox" id="kac-sec-en" /> Scheduled message (priority)</label>
         <div class="kac-row" id="kac-sec-wrap">
           <label title="Exact text or command to send on the schedule below. Sent verbatim so chat commands like !claim work. No rotation or invisible characters are added.">Message / command <span class="kac-q">?</span></label>
           <input type="text" id="kac-sec-msg" placeholder="!claim"
@@ -702,14 +714,16 @@
         <div class="kac-div"></div>
         <div class="kac-row">
           <label title="The mention watcher reads the on-page chat for messages that mention or reply to your username and logs them to the Mentions tab. Read-only — it never sends or replies. It is INDEPENDENT of the main Start button and works even when the auto-sender is stopped.">Mention watcher — your Kick username <span class="kac-q">?</span></label>
-          <div class="kac-inat" title="Type your username without the @ — the @ is added automatically.">
-            <span>@</span>
-            <input type="text" id="kac-watch-user" placeholder="your_kick_name"
-              title="Type your exact Kick username WITHOUT the @ (it's shown for you). The watcher flags any chat message containing @thisname or a reply to it." />
+          <div class="kac-inline">
+            <div class="kac-inat" title="Type your username without the @ — the @ is added automatically.">
+              <span>@</span>
+              <input type="text" id="kac-watch-user" placeholder="your_kick_name"
+                title="Type your exact Kick username WITHOUT the @ (it's shown for you). The watcher flags any chat message containing @thisname or a reply to it." />
+            </div>
+            <button class="kac-btn kac-btn-w" id="kac-watch-btn"
+              title="Start / stop watching chat for @mentions and replies to your username. INDEPENDENT of the main Start button — it works even when the auto-sender is stopped. Matches appear in the Mentions tab.">Start watching</button>
           </div>
         </div>
-        <button class="kac-btn" id="kac-watch-btn"
-          title="Start / stop watching chat for @mentions and replies to your username. INDEPENDENT of the main Start button — it works even when the auto-sender is stopped. Matches appear in the Mentions tab.">Start watching</button>
         <div id="kac-watch-status"
           title="Whether the mention watcher is active, and how many mentions it has caught this session."></div>
         <div class="kac-div"></div>
