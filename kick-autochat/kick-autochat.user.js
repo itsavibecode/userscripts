@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.16.0
+// @version      0.17.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -487,6 +487,10 @@
       .kac-badge{display:none;min-width:15px;padding:0 4px;border-radius:8px;background:#ff4757;color:#fff;
         font-size:9px;font-weight:700;text-align:center;line-height:15px}
       #kac-mentions{flex:1 1 auto;min-height:0;overflow:auto;padding:6px;font-size:10.5px;background:#0a0a0d}
+      #kac-tab-set{flex:0 0 32px}
+      #kac-settings{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px;
+        display:flex;flex-direction:column;gap:8px;background:#0f0f12}
+      .kac-set-h{font-size:9.5px;font-weight:700;letter-spacing:.4px;color:#9a9aa3}
       .kac-men-item{color:#e7e7ea;padding:3px 4px;border-bottom:1px solid #16161b;word-break:break-word}
       .kac-men-item.reply{color:#9ad4ff}
       #kac-logtab{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:12px;padding:0 4px}
@@ -681,36 +685,6 @@
               title="Type your exact Kick username WITHOUT the @ (it's shown for you). The watcher flags any chat message containing @thisname or a reply to it." />
           </div>
         </div>
-        <div class="kac-row">
-          <label title="Usernames the watcher will skip, separated by commas. Their messages never count as mentions — mainly for chat bots (e.g. the points bot that replies to !claim and would otherwise ping you every time). The @ is optional and matching ignores capitalisation. Add or remove any names you like.">Ignore senders (comma-separated) <span class="kac-q">?</span></label>
-          <input type="text" id="kac-watch-ignore" placeholder="e.g. Botrix, StreamElements"
-            title="Comma-separated usernames to ignore. Messages from these senders are never logged as mentions. The @ is optional; matching is case-insensitive. Leave empty to catch everyone." />
-        </div>
-        <label class="kac-check"
-          title="Play a short beep when a new mention arrives.">
-          <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
-        <label class="kac-check"
-          title="POST every detected mention to a webhook (Discord, or any endpoint that accepts JSON) with the sender, the message, the channel and a timestamp. Only mentions are sent — never your own chat messages.">
-          <input type="checkbox" id="kac-wh-en" /> Forward mentions to a webhook</label>
-        <div class="kac-row" id="kac-wh-wrap">
-          <label title="Paste your webhook URL. For Discord: Server Settings > Integrations > Webhooks > Copy Webhook URL. It is stored only in this browser.">Webhook URL <span class="kac-q">?</span></label>
-          <input type="text" id="kac-wh-url" placeholder="https://discord.com/api/webhooks/..."
-            title="Your webhook URL. Stored locally in this browser only. Treat it like a password — anyone with it can post to that channel." />
-          <div class="kac-grid" style="margin-top:6px">
-            <div class="kac-row">
-              <label title="Discord = a formatted message in the channel. Generic JSON = a raw JSON body with sender/message/channel/isReply/ts fields for your own endpoint.">Format <span class="kac-q">?</span></label>
-              <select id="kac-wh-fmt" title="Discord posts a readable message. Generic JSON posts raw fields for custom endpoints.">
-                <option value="discord">Discord</option>
-                <option value="json">Generic JSON</option>
-              </select>
-            </div>
-            <div class="kac-row">
-              <label title="Send a sample mention now to check the webhook works.">Check it <span class="kac-q">?</span></label>
-              <button class="kac-btn" id="kac-wh-test"
-                title="Posts a test mention to the webhook right now. Watch the Log tab for the result.">Test</button>
-            </div>
-          </div>
-        </div>
         <button class="kac-btn" id="kac-watch-btn"
           title="Start / stop watching chat for @mentions and replies to your username. INDEPENDENT of the main Start button — it works even when the auto-sender is stopped. Matches appear in the Mentions tab.">Start watching</button>
         <div id="kac-watch-status"
@@ -748,12 +722,48 @@
         <div id="kac-drawer-head">
           <button id="kac-tab-log" class="kac-tab active" title="Activity log: sends, start/stop, and errors.">Log</button>
           <button id="kac-tab-men" class="kac-tab" title="Mentions: messages that @ you or reply to you (needs the watcher enabled below).">Mentions <span id="kac-men-badge" class="kac-badge">0</span></button>
+          <button id="kac-tab-set" class="kac-tab" title="Settings: mention-watcher ignore list, sound, and webhook options.">⚙</button>
           <button id="kac-clear" title="Clear the list shown in the current tab (Log or Mentions).">Clear</button>
         </div>
         <div id="kac-log"
           title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Toggle it with the arrow in the title bar."></div>
         <div id="kac-mentions" style="display:none"
           title="Live @mentions and replies to your username, captured from chat. Read-only — the script never replies. Enable it with 'Watch for @mentions' in the controls."></div>
+        <div id="kac-settings" style="display:none">
+          <div class="kac-set-h">MENTION WATCHER</div>
+          <div class="kac-row">
+            <label title="Usernames the watcher will skip, separated by commas. Their messages never count as mentions — mainly for chat bots (e.g. the points bot that replies to !claim and would otherwise ping you every time). The @ is optional and matching ignores capitalisation. Add or remove any names you like.">Ignore senders (comma-separated) <span class="kac-q">?</span></label>
+            <input type="text" id="kac-watch-ignore" placeholder="e.g. Botrix, StreamElements"
+              title="Comma-separated usernames to ignore. Messages from these senders are never logged as mentions. The @ is optional; matching is case-insensitive. Leave empty to catch everyone." />
+          </div>
+          <label class="kac-check"
+            title="Play a short beep when a new mention arrives.">
+            <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
+          <div class="kac-div"></div>
+          <div class="kac-set-h">WEBHOOK</div>
+          <label class="kac-check"
+            title="POST every detected mention to a webhook (Discord, or any endpoint that accepts JSON) with the sender, the message, the channel and a timestamp. Only mentions are sent — never your own chat messages.">
+            <input type="checkbox" id="kac-wh-en" /> Forward mentions to a webhook</label>
+          <div class="kac-row" id="kac-wh-wrap">
+            <label title="Paste your webhook URL. For Discord: Server Settings > Integrations > Webhooks > Copy Webhook URL. It is stored only in this browser.">Webhook URL <span class="kac-q">?</span></label>
+            <input type="text" id="kac-wh-url" placeholder="https://discord.com/api/webhooks/..."
+              title="Your webhook URL. Stored locally in this browser only. Treat it like a password — anyone with it can post to that channel." />
+            <div class="kac-grid" style="margin-top:6px">
+              <div class="kac-row">
+                <label title="Discord = a formatted message in the channel. Generic JSON = a raw JSON body with sender/message/channel/isReply/ts fields for your own endpoint.">Format <span class="kac-q">?</span></label>
+                <select id="kac-wh-fmt" title="Discord posts a readable message. Generic JSON posts raw fields for custom endpoints.">
+                  <option value="discord">Discord</option>
+                  <option value="json">Generic JSON</option>
+                </select>
+              </div>
+              <div class="kac-row">
+                <label title="Send a sample mention now to check the webhook works.">Check it <span class="kac-q">?</span></label>
+                <button class="kac-btn" id="kac-wh-test"
+                  title="Posts a test mention to the webhook right now. Watch the Log tab for the result.">Test</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     `;
     document.body.appendChild(p);
@@ -807,6 +817,8 @@
       whTest: p.querySelector('#kac-wh-test'),
       tabLog: p.querySelector('#kac-tab-log'),
       tabMen: p.querySelector('#kac-tab-men'),
+      tabSet: p.querySelector('#kac-tab-set'),
+      settingsPane: p.querySelector('#kac-settings'),
       clear: p.querySelector('#kac-clear'),
       menBadge: p.querySelector('#kac-men-badge'),
       mentions: p.querySelector('#kac-mentions'),
@@ -913,6 +925,7 @@
     ui.whFmt.addEventListener('change', () => { settings.webhookFormat = ui.whFmt.value; saveSettings(); });
     ui.whTest.addEventListener('click', () => {
       if (!(settings.webhookUrl || '').trim()) { log('Webhook: paste a URL first.', true); return; }
+      setTab('log'); // the result lands in the log — show it
       log('Webhook: sending test…');
       const wasEnabled = settings.webhookEnabled;
       settings.webhookEnabled = true; // let Test work even before enabling
@@ -928,6 +941,7 @@
     });
     ui.tabLog.addEventListener('click', () => setTab('log'));
     ui.tabMen.addEventListener('click', () => setTab('men'));
+    ui.tabSet.addEventListener('click', () => setTab('set'));
     ui.clear.addEventListener('click', () => {
       if (activeTab === 'men') {
         ui.mentions.textContent = '';
@@ -1278,8 +1292,12 @@
     activeTab = tab;
     if (ui.log) ui.log.style.display = tab === 'log' ? '' : 'none';
     if (ui.mentions) ui.mentions.style.display = tab === 'men' ? '' : 'none';
+    if (ui.settingsPane) ui.settingsPane.style.display = tab === 'set' ? '' : 'none';
     if (ui.tabLog) ui.tabLog.classList.toggle('active', tab === 'log');
     if (ui.tabMen) ui.tabMen.classList.toggle('active', tab === 'men');
+    if (ui.tabSet) ui.tabSet.classList.toggle('active', tab === 'set');
+    // Clear only applies to the two list tabs.
+    if (ui.clear) ui.clear.style.display = tab === 'set' ? 'none' : '';
     if (tab === 'men') { unreadMen = 0; updateMenBadge(); }
   }
 
