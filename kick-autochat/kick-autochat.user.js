@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.18.0
+// @version      0.19.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -94,6 +94,8 @@
   let lastBase = null;        // last text sent, so random mode never repeats it back-to-back
   let chatObserver = null;    // MutationObserver watching chat for mentions
   let chatFindTimer = null;   // retry timer to (re)attach the observer
+  let maxChatIndex = -1;      // highest data-index seen; the virtual list re-adds
+                              // old lines while scrolling, so ignore anything older
   const recentMentions = new Set(); // de-dupe signatures of logged mentions
   let activeTab = 'log';      // which drawer tab is showing ('log' | 'men')
   let unreadMen = 0;          // unseen mention count (for the badge)
@@ -1492,7 +1494,20 @@
     if (!settings.watchEnabled || node.nodeType !== 1) return;
     const name = watchName();
     if (!name) return;
-    const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+
+    // Resolve to the virtual-list line wrapper. Scrolling re-renders old lines,
+    // so anything older than the highest index we've seen is not a new message.
+    const line = chatLineOf(node);
+    if (line) {
+      const idx = parseInt(line.getAttribute('data-index'), 10);
+      if (Number.isFinite(idx)) {
+        if (idx < maxChatIndex) return;
+        maxChatIndex = Math.max(maxChatIndex, idx);
+      }
+    }
+    const target = line || node;
+
+    const text = lineText(target);
     if (!text || text.length > 600) return;
     const m = matchesMention(text, name);
     if (!m.hit) return;
@@ -1500,19 +1515,43 @@
     if (recentMentions.has(sig)) return;
     recentMentions.add(sig);
     while (recentMentions.size > 80) recentMentions.delete(recentMentions.values().next().value);
-    const sender = extractSender(node);
+    const sender = extractSender(target);
     if (sender && sender.toLowerCase() === name.toLowerCase()) return; // your own message
     if (isIgnoredSender(sender)) return; // bots / muted senders
     addMention(text, m.isReply, sender);
   }
 
+  // Kick renders chat as a VIRTUALISED list: a container (div.no-scrollbar.relative
+  // with an explicit pixel height) whose children are div[data-index="N"] wrappers,
+  // absolutely positioned via translateY. data-index is the reliable hook — Kick's
+  // markup is Tailwind utility classes, so there are no semantic class names.
   function findChatList() {
-    const sels = ['[data-chat-entry]', '[data-chat-id]', '[class*="chat-entry" i]', '[class*="chatMessage" i]'];
+    const line = document.querySelector('div[data-index]');
+    if (line && line.parentElement) return line.parentElement;
+    // Fallbacks for older/other layouts.
+    const sels = ['[data-chat-entry]', '[data-chat-id]', '[class*="chat-entry" i]'];
     for (const s of sels) {
       const el = document.querySelector(s);
       if (el) return el.parentElement || el;
     }
     return null;
+  }
+
+  // The line wrapper for an added node, plus its virtual-list index.
+  function chatLineOf(node) {
+    if (!node.closest) return null;
+    return node.matches('[data-index]') ? node : node.closest('[data-index]');
+  }
+
+  // Text of a chat line with Kick's own timestamp span stripped out.
+  function lineText(el) {
+    try {
+      const c = el.cloneNode(true);
+      c.querySelectorAll('span[style*="chatroom-timestamps-display"]').forEach((n) => n.remove());
+      return (c.textContent || '').replace(/\s+/g, ' ').trim();
+    } catch (e) {
+      return (el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
   }
 
   function startWatcher() {
@@ -1521,11 +1560,18 @@
       if (chatObserver) return;
       const list = findChatList();
       if (!list) return;
+      // Seed from the lines already on screen so the existing backlog isn't
+      // replayed as brand-new mentions the moment we attach.
+      const idxs = [...list.querySelectorAll('[data-index]')]
+        .map((e) => parseInt(e.getAttribute('data-index'), 10))
+        .filter(Number.isFinite);
+      maxChatIndex = idxs.length ? Math.max(...idxs) : -1;
+
       chatObserver = new MutationObserver((muts) => {
         for (const mu of muts) for (const node of mu.addedNodes) handleChatNode(node);
       });
       chatObserver.observe(list, { childList: true, subtree: true });
-      log(`Mention watcher attached (@${watchName() || '?'}).`);
+      log(`Mention watcher attached (@${watchName() || '?'}) — ${idxs.length} lines on screen.`);
     };
     attach();
     chatFindTimer = setInterval(() => { if (!chatObserver) attach(); }, 3000);
