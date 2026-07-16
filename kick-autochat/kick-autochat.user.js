@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.25.0
+// @version      0.26.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -22,6 +22,11 @@
   // matches the @version header (fallback string only used if GM_info is absent).
   const VERSION =
     (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.5.1';
+  const TITLE = 'Kick Auto-Chat v' + VERSION;
+
+  // Mentions are kept in their own store so they survive a reload.
+  const MEN_KEY = 'kick-autochat:mentions';
+  const MEN_MAX = 60;
 
   // ----------------------------------------------------------------------
   // Persistent settings (localStorage, per-origin)
@@ -103,7 +108,8 @@
   const seenLines = new Set();
   let activeTab = 'log';      // which drawer tab is showing ('log' | 'men')
   let unreadMen = 0;          // unseen mention count (for the badge)
-  let menTotal = 0;           // total mentions caught this session
+  let menTotal = 0;           // how many mentions are in the list
+  let mentionLog = [];        // persisted mention records (see MEN_KEY)
 
   // ----------------------------------------------------------------------
   // Chat input / send logic
@@ -608,7 +614,7 @@
       <div id="kac-main">
       <div id="kac-head" title="Drag this bar to move the panel. The green dot lights up while auto-sending is running.">
         <span class="dot" id="kac-dot" title="Status light: green = running, grey = idle/stopped."></span>
-        <span id="kac-title">Kick Auto-Chat</span>
+        <span id="kac-title">Kick Auto-Chat</span><!-- replaced with TITLE (incl. version) on build -->
         <button id="kac-logtab" title="Show / hide the log & mentions panel on the right.">◀</button>
         <span id="kac-logtab-badge" class="kac-badge" title="Unseen mentions — open the panel and click the Mentions tab to view them.">0</span>
         <button id="kac-collapse" title="Collapse / expand the panel. State is remembered.">_</button>
@@ -758,14 +764,14 @@
       <div id="kac-drawer">
         <div id="kac-drawer-head">
           <button id="kac-tab-log" class="kac-tab active" title="Activity log: sends, start/stop, and errors.">Log</button>
-          <button id="kac-tab-men" class="kac-tab" title="Mentions: messages that @ you or reply to you (needs the watcher enabled below).">Mentions <span id="kac-men-badge" class="kac-badge">0</span></button>
+          <button id="kac-tab-men" class="kac-tab" title="Mentions: messages that @ you or reply to you (needs the watcher enabled below). Saved locally, so they survive a browser reload — use Clear to wipe them.">Mentions <span id="kac-men-badge" class="kac-badge">0</span></button>
           <button id="kac-tab-set" class="kac-tab" title="Settings: mention-watcher ignore list, sound, and webhook options.">⚙</button>
           <button id="kac-clear" title="Clear the list shown in the current tab (Log or Mentions).">Clear</button>
         </div>
         <div id="kac-log"
           title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Toggle it with the arrow in the title bar."></div>
         <div id="kac-mentions" style="display:none"
-          title="Live @mentions and replies to your username, captured from chat. Read-only — the script never replies. Enable it with 'Watch for @mentions' in the controls."></div>
+          title="@mentions and replies to your username, captured from chat. Read-only — the script never replies. Saved locally, so they come back after a browser reload; Clear wipes them."></div>
         <div id="kac-settings" style="display:none">
           <div class="kac-set-h">MENTION WATCHER</div>
           <div class="kac-row">
@@ -875,11 +881,13 @@
       resize: p.querySelector('#kac-resize'),
     };
 
-    // Show the running version in the footer.
+    // Show the running version in the footer and the title bar.
     const verEl = p.querySelector('#kac-ver');
     if (verEl) verEl.textContent = VERSION;
+    ui.titleEl.textContent = TITLE;
 
     applySettingsToUI();
+    restoreMentions();
     setTab('log');
 
     // Wire events
@@ -987,9 +995,12 @@
     ui.tabSet.addEventListener('click', () => setTab('set'));
     ui.clear.addEventListener('click', () => {
       if (activeTab === 'men') {
-        // Only the display is cleared — the seen-set stays, otherwise the next
-        // scan would re-alert every mention still on screen and refill the list.
+        // Clears the display AND the saved history. The seen-set stays, though —
+        // wiping it would make the next scan re-alert everything still on screen
+        // and immediately refill the list we just emptied.
         ui.mentions.textContent = '';
+        mentionLog = [];
+        saveMentions();
         menTotal = 0;
         unreadMen = 0;
         updateMenBadge();
@@ -1299,7 +1310,7 @@
       ui.status.innerHTML = `Paused — not on <b>@${target}</b> (here: @${currentChannel() || '—'})`;
       ui.titleEl.textContent = settings.collapsed
         ? `Paused @${target}`
-        : `Kick Auto-Chat · paused`;
+        : `${TITLE} · paused`;
       return;
     }
 
@@ -1311,12 +1322,12 @@
       const tail = secondTitleTail();
       ui.titleEl.textContent = settings.collapsed
         ? `${secs}s · ${sendCount} sent${tail}`
-        : `Kick Auto-Chat · ${secs}s · ${sendCount} sent${tail}`;
+        : `${TITLE} · ${secs}s · ${sendCount} sent${tail}`;
     } else {
       ui.status.innerHTML = `Idle · target @${target} · sent ${sendCount}`;
       ui.titleEl.textContent = settings.collapsed
         ? `Idle · ${sendCount} sent`
-        : 'Kick Auto-Chat';
+        : TITLE;
     }
   }
 
@@ -1550,52 +1561,112 @@
       .catch((e) => log(`Webhook error: ${e.message} (blocked by CORS?)`, true));
   }
 
-  function addMention(m) {
+  // Local date + time, e.g. "7/16/26, 2:54:07 PM". Mentions outlive the session
+  // now, so a bare clock time would be ambiguous.
+  function stampLocal(d) {
+    try {
+      return d.toLocaleString([], {
+        year: '2-digit', month: 'numeric', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', second: '2-digit',
+      });
+    } catch (e) {
+      return d.toLocaleString();
+    }
+  }
+
+  function loadMentions() {
+    try {
+      const raw = localStorage.getItem(MEN_KEY);
+      if (!raw) return [];
+      const a = JSON.parse(raw);
+      return Array.isArray(a) ? a.slice(-MEN_MAX) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function saveMentions() {
+    try {
+      localStorage.setItem(MEN_KEY, JSON.stringify(mentionLog.slice(-MEN_MAX)));
+    } catch (e) { /* ignore quota errors */ }
+  }
+
+  // Render one stored record. Used both for live mentions and for the list
+  // restored on reload, so they can't drift apart.
+  function renderMention(rec) {
     if (!ui.mentions) return;
-    const now = new Date();
-    const time = now.toLocaleTimeString(); // local clock
-    const body = m.body || '(no text)';
-    const prefix = m.kind === 'reply' ? '↩ ' : m.kind === 'quote' ? '❝ ' : '';
-    const reUser = m.kind === 'quote' && m.rep && m.rep.user ? ` (re: @${m.rep.user})` : '';
+    const body = rec.body || '(no text)';
+    const prefix = rec.kind === 'reply' ? '↩ ' : rec.kind === 'quote' ? '❝ ' : '';
+    const reUser = rec.kind === 'quote' && rec.replyTo ? ` (re: @${rec.replyTo})` : '';
 
     const div = document.createElement('div');
-    div.className = 'kac-men-item ' + m.kind;
+    div.className = 'kac-men-item ' + rec.kind;
     // Built from separate spans with textContent, so chat text can't inject markup.
     const tEl = document.createElement('span');
     tEl.className = 'kac-men-t';
-    tEl.textContent = `[${time}] `;
+    tEl.textContent = `[${stampLocal(new Date(rec.ts))}] `;
     div.appendChild(tEl);
     const sEl = document.createElement('span');
     sEl.className = 'kac-men-s';
-    sEl.textContent = `${prefix}${m.sender || '?'}${reUser}: `;
+    sEl.textContent = `${prefix}${rec.sender || '?'}${reUser}: `;
     div.appendChild(sEl);
     const bEl = document.createElement('span');
     bEl.textContent = body;
     div.appendChild(bEl);
     // For a quote match, show what was quoted — that's where your name was.
-    if (m.kind === 'quote' && m.rep && m.rep.quote) {
+    if (rec.kind === 'quote' && rec.replyQuote) {
       const qEl = document.createElement('div');
       qEl.className = 'kac-men-q';
-      qEl.textContent = '↳ ' + m.rep.quote.slice(0, 140);
+      qEl.textContent = '↳ ' + rec.replyQuote.slice(0, 140);
       div.appendChild(qEl);
     }
     ui.mentions.appendChild(div);
     ui.mentions.scrollTop = ui.mentions.scrollHeight;
-    while (ui.mentions.childNodes.length > 60) ui.mentions.removeChild(ui.mentions.firstChild);
-    menTotal++;
+    while (ui.mentions.childNodes.length > MEN_MAX) ui.mentions.removeChild(ui.mentions.firstChild);
+  }
+
+  // Re-draw the saved mentions after a reload.
+  function restoreMentions() {
+    if (!ui.mentions) return;
+    mentionLog = loadMentions();
+    ui.mentions.textContent = '';
+    for (const rec of mentionLog) renderMention(rec);
+    menTotal = mentionLog.length;
+    unreadMen = 0; // restored history isn't "new"
+    updateMenBadge();
+    updateWatchStatus();
+  }
+
+  function addMention(m) {
+    if (!ui.mentions) return;
+    const now = new Date();
+    const rec = {
+      ts: now.toISOString(),
+      kind: m.kind,
+      sender: m.sender || '',
+      body: m.body || '',
+      replyTo: m.rep ? m.rep.user : '',
+      replyQuote: m.rep ? m.rep.quote : '',
+    };
+    mentionLog.push(rec);
+    while (mentionLog.length > MEN_MAX) mentionLog.shift();
+    saveMentions();
+    renderMention(rec);
+
+    menTotal = mentionLog.length;
     updateWatchStatus();
     if (activeTab !== 'men') { unreadMen++; updateMenBadge(); }
     if (settings.watchSound) beep();
     postWebhook({
       channel: currentChannel(),
-      sender: m.sender || '',
-      message: body,
-      kind: m.kind,                        // 'mention' | 'reply' | 'quote'
-      isReply: m.kind === 'reply',
-      replyTo: m.rep ? m.rep.user : '',
-      replyQuote: m.rep ? m.rep.quote : '',
-      ts: now.toISOString(),               // UTC, machine-readable
-      tsLocal: now.toLocaleString(),       // your local date + time
+      sender: rec.sender,
+      message: rec.body || '(no text)',
+      kind: rec.kind,                      // 'mention' | 'reply' | 'quote'
+      isReply: rec.kind === 'reply',
+      replyTo: rec.replyTo,
+      replyQuote: rec.replyQuote,
+      ts: rec.ts,                          // UTC, machine-readable
+      tsLocal: stampLocal(now),            // your local date + time
     });
   }
 
