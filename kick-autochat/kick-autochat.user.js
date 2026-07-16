@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.19.0
+// @version      0.20.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -48,7 +48,7 @@
     // Senders the watcher skips (comma-separated). Pre-filled with the usual
     // Kick bots — the points bot answering !claim would otherwise ping you
     // every time. Fully editable; add whatever you like.
-    ignoreSenders: 'Botrix, StreamElements, Fossabot, Nightbot',
+    ignoreSenders: 'ShoovyBot, Botrix, StreamElements, Fossabot, Nightbot',
     webhookEnabled: false,  // POST each mention to a webhook
     webhookUrl: '',         // Discord webhook URL, or any endpoint that accepts JSON
     webhookFormat: 'discord', // 'discord' | 'json'
@@ -1405,18 +1405,41 @@
     return { hit: false };
   }
 
+  // Kick renders the username as <button data-prevent-expand> and its text
+  // INCLUDES a leading @ (e.g. "@ShoovyBot") — strip it so ignore-list and
+  // own-message comparisons work against a bare name.
   function extractSender(node) {
     let s = '';
     try {
-      const el = node.querySelector && node.querySelector('[class*="username" i], [data-chat-entry-user], a[href^="/"]');
-      if (el) s = el.textContent || '';
+      const b = node.querySelector && node.querySelector('button[data-prevent-expand]');
+      if (b) s = b.textContent || '';
+      if (!s) {
+        const alt = node.querySelector && node.querySelector('[class*="username" i], [data-chat-entry-user]');
+        if (alt) s = alt.textContent || '';
+      }
       if (!s) {
         const t = node.textContent || '';
         const i = t.indexOf(':');
         if (i > 0 && i < 32) s = t.slice(0, i);
       }
     } catch (e) {}
-    return (s || '').replace(/\s+/g, ' ').trim();
+    return (s || '').replace(/\s+/g, ' ').trim().replace(/^@+/, '');
+  }
+
+  // The message text on its own: clone the line and drop Kick's timestamp, the
+  // ":" separator, and the badges+username block. The message spans are SIBLINGS
+  // of that block, so removing it leaves exactly the message.
+  function extractBody(el) {
+    try {
+      const c = el.cloneNode(true);
+      c.querySelectorAll('span[style*="chatroom-timestamps-display"]').forEach((n) => n.remove());
+      c.querySelectorAll('[aria-hidden="true"]').forEach((n) => n.remove());
+      c.querySelectorAll('button[data-prevent-expand]').forEach((n) => (n.parentElement || n).remove());
+      const t = (c.textContent || '').replace(/\s+/g, ' ').trim();
+      return t || null;
+    } catch (e) {
+      return null;
+    }
   }
 
   // Split the rendered chat line into sender + message where we can, so the
@@ -1452,11 +1475,13 @@
       .catch((e) => log(`Webhook error: ${e.message} (blocked by CORS?)`, true));
   }
 
-  function addMention(text, isReply, sender) {
+  function addMention(text, isReply, sender, bodyText) {
     if (!ui.mentions) return;
     const now = new Date();
     const time = now.toLocaleTimeString(); // local clock
-    const body = splitMessage(text, sender);
+    // Prefer the message pulled straight from the DOM; fall back to trimming
+    // the sender off the rendered line.
+    const body = bodyText || splitMessage(text, sender);
 
     const div = document.createElement('div');
     div.className = 'kac-men-item' + (isReply ? ' reply' : '');
@@ -1518,7 +1543,7 @@
     const sender = extractSender(target);
     if (sender && sender.toLowerCase() === name.toLowerCase()) return; // your own message
     if (isIgnoredSender(sender)) return; // bots / muted senders
-    addMention(text, m.isReply, sender);
+    addMention(text, m.isReply, sender, extractBody(target));
   }
 
   // Kick renders chat as a VIRTUALISED list: a container (div.no-scrollbar.relative
