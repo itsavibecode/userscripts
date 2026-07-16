@@ -96,6 +96,27 @@ const server = http.createServer(async (req, res) => {
   res.end('not found');
 });
 
+// Without this, a second copy dies with an unhandled 'error' event and a wall of
+// stack trace. The overwhelmingly likely cause is simply that it's already up.
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error('');
+    console.error(`  Port ${PORT} is already in use.`);
+    console.error('');
+    console.error('  The remote server is almost certainly ALREADY RUNNING in another');
+    console.error('  window - look for it, or just open the phone address again.');
+    console.error('');
+    console.error('  If you want a second one on a different port:');
+    console.error(`      set PORT=3301 && node server.js`);
+    console.error('  then set that same port in the Kick panel (gear - Server port).');
+  } else {
+    console.error('');
+    console.error('  Server error:', (err && err.message) || err);
+  }
+  console.error('');
+  process.exit(1);
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   const nets = os.networkInterfaces();
   const ips = [];
