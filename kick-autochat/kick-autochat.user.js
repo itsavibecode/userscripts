@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.22.0
+// @version      0.23.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -96,9 +96,11 @@
   let rotateIndex = 0;        // position in the rotation pool (sequential mode)
   let lastBase = null;        // last text sent, so random mode never repeats it back-to-back
   let watchTimer = null;      // 1s poll scanning chat for mentions
-  let maxChatIndex = -1;      // highest data-index seen; the virtual list re-renders
-                              // old lines while scrolling, so ignore anything older
-  const recentMentions = new Set(); // de-dupe signatures of logged mentions
+  let watcherSeeded = false;  // have we marked the on-screen backlog as already seen?
+  // Signatures of chat lines already handled. We can NOT key this on data-index:
+  // Kick caps its chat buffer, so once it fills, the virtualiser stops handing out
+  // ever-increasing indices and an index high-water mark silently skips everything.
+  const seenLines = new Set();
   let activeTab = 'log';      // which drawer tab is showing ('log' | 'men')
   let unreadMen = 0;          // unseen mention count (for the badge)
   let menTotal = 0;           // total mentions caught this session
@@ -964,8 +966,9 @@
     ui.tabSet.addEventListener('click', () => setTab('set'));
     ui.clear.addEventListener('click', () => {
       if (activeTab === 'men') {
+        // Only the display is cleared — the seen-set stays, otherwise the next
+        // scan would re-alert every mention still on screen and refill the list.
         ui.mentions.textContent = '';
-        recentMentions.clear(); // so a repeat of the same text can log again
         menTotal = 0;
         unreadMen = 0;
         updateMenBadge();
@@ -1571,19 +1574,14 @@
     });
   }
 
-  function processChatLine(target, name, idx) {
+  // Called once per new line — scanChat's seen-set already handles de-duping.
+  function processChatLine(target, name) {
     const sender = extractSender(target);
     if (sender && sender.toLowerCase() === name.toLowerCase()) return; // your own message
     if (isIgnoredSender(sender)) return; // bots / muted senders
 
     const c = classifyLine(target, name);
     if (!c.hit) return;
-
-    // Keyed by line index, so identical text from the same person still logs.
-    const sig = idx + '|' + (c.body || '').slice(0, 120);
-    if (recentMentions.has(sig)) return;
-    recentMentions.add(sig);
-    while (recentMentions.size > 80) recentMentions.delete(recentMentions.values().next().value);
 
     addMention({ kind: c.kind, sender, body: c.body, rep: c.rep });
   }
@@ -1604,6 +1602,15 @@
     return out;
   }
 
+  // Identity of a chat line, independent of its position in the virtual list.
+  // Kick's own timestamp is in the DOM even when hidden by CSS, which gives us
+  // minute resolution to separate a repeat from a re-render of the same message.
+  function lineSig(el) {
+    const tEl = el.querySelector('span[style*="chatroom-timestamps-display"]');
+    const t = tEl ? (tEl.textContent || '').trim() : '';
+    return t + '|' + extractSender(el) + '|' + (extractBody(el) || '').slice(0, 140);
+  }
+
   // Poll the rendered chat lines once a second. Simpler and far more robust than
   // a MutationObserver here: React re-renders can swap the list container out from
   // under an observer, and the virtualiser recycles rows. Only ~20-40 short lines
@@ -1615,31 +1622,38 @@
     const lines = chatLines();
     if (!lines.length) return;
 
-    if (maxChatIndex < 0) {
-      // First sight of chat: mark where we came in so the existing backlog
-      // isn't replayed as brand-new mentions.
-      maxChatIndex = lines[lines.length - 1].idx;
+    if (!watcherSeeded) {
+      // First sight of chat: mark everything on screen as already seen so the
+      // backlog isn't replayed as brand-new mentions.
+      for (const { el } of lines) seenLines.add(lineSig(el));
+      watcherSeeded = true;
       log(`Mention watcher attached (@${name}) — ${lines.length} lines on screen.`);
       return;
     }
 
-    for (const { el, idx } of lines) {
-      if (idx <= maxChatIndex) continue; // already seen, or an old row re-rendered
-      maxChatIndex = idx;
-      processChatLine(el, name, idx);
+    for (const { el } of lines) {
+      const sig = lineSig(el);
+      if (seenLines.has(sig)) continue; // already handled, or just a re-render
+      seenLines.add(sig);
+      // Plenty of headroom over the ~40 lines on screen, so nothing still
+      // visible can be evicted and re-alert.
+      while (seenLines.size > 500) seenLines.delete(seenLines.values().next().value);
+      processChatLine(el, name);
     }
   }
 
   function startWatcher() {
     if (watchTimer) return;
-    maxChatIndex = -1;
+    watcherSeeded = false;
+    seenLines.clear();
     watchTimer = setInterval(scanChat, 1000);
     scanChat();
   }
 
   function stopWatcher() {
     if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
-    maxChatIndex = -1;
+    watcherSeeded = false;
+    seenLines.clear();
   }
 
   function applyWatcher() {
