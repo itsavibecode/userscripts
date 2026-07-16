@@ -92,6 +92,25 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // Home-screen icons and the web app manifest. An explicit allowlist rather
+  // than mapping the URL onto the filesystem, so no path can escape this folder.
+  const STATIC = {
+    '/icon-32.png': 'image/png',
+    '/icon-180.png': 'image/png',
+    '/icon-192.png': 'image/png',
+    '/icon-512.png': 'image/png',
+    '/manifest.webmanifest': 'application/manifest+json',
+    '/favicon.ico': 'image/png', // browsers ask for this unprompted
+  };
+  if (STATIC[url]) {
+    const file = path.join(__dirname, url === '/favicon.ico' ? 'icon-32.png' : url);
+    return fs.readFile(file, (err, buf) => {
+      if (err) { res.writeHead(404); return res.end('not found'); }
+      res.writeHead(200, { 'Content-Type': STATIC[url], 'Cache-Control': 'max-age=86400' });
+      res.end(buf);
+    });
+  }
+
   res.writeHead(404);
   res.end('not found');
 });

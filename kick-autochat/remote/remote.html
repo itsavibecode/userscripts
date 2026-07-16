@@ -5,15 +5,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="dark" />
 <title>Kick Auto-Chat — Remote</title>
+
+<!-- Home-screen install. iOS only accepts a PNG for apple-touch-icon (no SVG),
+     and it ignores the manifest's icons entirely — hence both. -->
+<link rel="apple-touch-icon" href="/icon-180.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#0a0a0d" />
+<!-- Launch without Safari's chrome when opened from the home screen. The apple-
+     prefixed one is deprecated but is still what iOS actually reads. -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Kick Remote" />
 <style>
   :root{
     --bg:#0a0a0d; --card:#0f0f12; --line:#2a2a30; --dim:#9a9aa3; --fg:#e7e7ea;
     --green:#53fc18; --red:#ff4757; --blue:#9ad4ff; --amber:#ffc266;
   }
   *{box-sizing:border-box}
+  /* Launched from the home screen there's no Safari chrome and the status bar
+     overlays the page, so keep clear of the notch top and bottom. */
   body{margin:0;background:var(--bg);color:var(--fg);
     font:14px/1.45 system-ui,-apple-system,Segoe UI,Arial,sans-serif;
-    padding:12px 12px calc(12px + env(safe-area-inset-bottom));}
+    padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));}
   header{display:flex;align-items:center;gap:8px;margin-bottom:10px}
   .dot{width:10px;height:10px;border-radius:50%;background:#666;flex:0 0 auto}
   .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
