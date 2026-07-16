@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.21.0
+// @version      0.22.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -498,9 +498,12 @@
       .kac-set-h{font-size:9.5px;font-weight:700;letter-spacing:.4px;color:#9a9aa3}
       .kac-men-item{color:#e7e7ea;padding:3px 4px;border-bottom:1px solid #16161b;word-break:break-word}
       .kac-men-item.reply{border-left:2px solid #9ad4ff;padding-left:4px}
+      .kac-men-item.quote{border-left:2px solid #ffc266;padding-left:4px}
       .kac-men-t{color:#6f6f78}
       .kac-men-s{color:#53fc18;font-weight:700}
       .kac-men-item.reply .kac-men-s{color:#9ad4ff}
+      .kac-men-item.quote .kac-men-s{color:#ffc266}
+      .kac-men-q{color:#6f6f78;font-size:9.5px;padding-left:8px;margin-top:1px}
       #kac-logtab{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:12px;padding:0 4px}
       #kac-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:move;
         background:linear-gradient(90deg,#1b2f1b,#13131a);border-bottom:1px solid #2a2a30}
@@ -1389,20 +1392,30 @@
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  function matchesMention(text, name) {
+  // Work out whether — and HOW — a line concerns you. Matching the whole line
+  // blindly is wrong: a reply's quoted text can contain your name even though the
+  // sender never tagged you, which is how "baezyx mentioned you" got reported for
+  // a message that was really three dolphin emotes aimed at a bot.
+  //   'reply'   – they replied directly to you
+  //   'mention' – they tagged you in what they actually typed
+  //   'quote'   – they replied to someone ELSE's message that tagged you
+  function classifyLine(el, name) {
     const esc = escapeRe(name);
-    // A reply is only "to you" when your name sits right after "Replying to" —
-    // NOT merely because the line contains "replying to" somewhere and your
-    // name somewhere else (that's a reply to someone that mentions you).
-    const replyToMe = new RegExp('replying to\\s*@?' + esc + '\\b', 'i').test(text);
+    const atMe = new RegExp('@' + esc + '\\b', 'i');
+    const bareMe = new RegExp('\\b' + esc + '\\b', 'i');
+    const body = extractBody(el) || '';
+    const rep = extractReply(el);
 
-    if (new RegExp('@' + esc + '\\b', 'i').test(text)) {
-      return { hit: true, isReply: replyToMe };
+    if (rep && rep.user && rep.user.toLowerCase() === name.toLowerCase()) {
+      return { hit: true, kind: 'reply', body, rep };
     }
-    if (replyToMe) return { hit: true, isReply: true };
-    // Optional: your bare username with no @ anywhere in the message.
-    if (settings.watchBareName && new RegExp('\\b' + esc + '\\b', 'i').test(text)) {
-      return { hit: true, isReply: false };
+    if (atMe.test(body)) return { hit: true, kind: 'mention', body, rep };
+    if (settings.watchBareName && bareMe.test(body)) {
+      return { hit: true, kind: 'mention', body, rep };
+    }
+    if (rep && rep.quote && (atMe.test(rep.quote) ||
+        (settings.watchBareName && bareMe.test(rep.quote)))) {
+      return { hit: true, kind: 'quote', body, rep };
     }
     return { hit: false };
   }
@@ -1428,15 +1441,27 @@
     return (s || '').replace(/\s+/g, ' ').trim().replace(/^@+/, '');
   }
 
-  // The message text on its own: clone the line and drop Kick's timestamp, the
-  // ":" separator, and the badges+username block. The message spans are SIBLINGS
-  // of that block, so removing it leaves exactly the message.
+  // Emotes are <span data-emote-name="x"> wrapping an <img alt="x">. They carry no
+  // text, so a message that is only emotes reads as empty — render them as :name:.
+  function deEmote(root) {
+    root.querySelectorAll('[data-emote-name]').forEach((n) =>
+      n.replaceWith(root.ownerDocument.createTextNode(' :' + n.getAttribute('data-emote-name') + ': ')));
+    root.querySelectorAll('img[alt]').forEach((n) =>
+      n.replaceWith(root.ownerDocument.createTextNode(' :' + n.getAttribute('alt') + ': ')));
+  }
+
+  // The message the user actually typed. Scoped to the nearest .break-words box
+  // around the username button — a reply's "Replying to ..." preview is a SIBLING
+  // of that box, so scoping this way excludes the quoted text automatically.
   function extractBody(el) {
     try {
-      const c = el.cloneNode(true);
+      const btn = el.querySelector('button[data-prevent-expand]');
+      const box = (btn && btn.closest('.break-words')) || el;
+      const c = box.cloneNode(true);
       c.querySelectorAll('span[style*="chatroom-timestamps-display"]').forEach((n) => n.remove());
       c.querySelectorAll('[aria-hidden="true"]').forEach((n) => n.remove());
       c.querySelectorAll('button[data-prevent-expand]').forEach((n) => (n.parentElement || n).remove());
+      deEmote(c);
       const t = (c.textContent || '').replace(/\s+/g, ' ').trim();
       return t || null;
     } catch (e) {
@@ -1444,13 +1469,26 @@
     }
   }
 
-  // Split the rendered chat line into sender + message where we can, so the
-  // webhook payload has clean fields instead of one blob.
-  function splitMessage(text, sender) {
-    if (sender && text.toLowerCase().startsWith(sender.toLowerCase())) {
-      return text.slice(sender.length).replace(/^[:\s]+/, '');
+  // The "Replying to @who: quoted text" preview, if this line is a reply.
+  // It's a <button> (without data-prevent-expand) whose text starts "Replying to".
+  function extractReply(el) {
+    try {
+      const rb = [...el.querySelectorAll('button')].find(
+        (b) => !b.hasAttribute('data-prevent-expand') &&
+               /^\s*Replying to/i.test((b.textContent || '').replace(/\s+/g, ' ')));
+      if (!rb) return null;
+      const wrap = rb.querySelector('span');
+      const kids = wrap ? [...wrap.querySelectorAll(':scope > span')] : [];
+      const userEl = kids[0], quoteEl = kids[1];
+      const quoteClone = quoteEl ? quoteEl.cloneNode(true) : null;
+      if (quoteClone) deEmote(quoteClone);
+      return {
+        user: userEl ? (userEl.textContent || '').trim().replace(/^@+/, '') : '',
+        quote: quoteClone ? (quoteClone.textContent || '').replace(/\s+/g, ' ').trim() : '',
+      };
+    } catch (e) {
+      return null;
     }
-    return text;
   }
 
   function postWebhook(data) {
@@ -1461,10 +1499,17 @@
     let body;
     if (settings.webhookFormat === 'discord') {
       const who = data.sender || 'someone';
-      const verb = data.isReply ? 'replied to you' : 'mentioned you';
+      const verb = data.kind === 'reply' ? 'replied to you'
+        : data.kind === 'quote' ? `replied to @${data.replyTo}'s message that tagged you`
+        : 'mentioned you';
+      let content = `**${who}** ${verb} in kick.com/${data.channel} — ${data.tsLocal}\n> ${data.message}`;
+      // For a quote match, include what was quoted — that's where your name was.
+      if (data.kind === 'quote' && data.replyQuote) {
+        content += `\n(in reply to: ${data.replyQuote.slice(0, 200)})`;
+      }
       body = JSON.stringify({
         username: 'Kick Auto-Chat',
-        content: `**${who}** ${verb} in kick.com/${data.channel} — ${data.tsLocal}\n> ${data.message}`,
+        content,
         // Never let a chat message trigger @everyone/@here pings in Discord.
         allowed_mentions: { parse: [] },
       });
@@ -1477,16 +1522,16 @@
       .catch((e) => log(`Webhook error: ${e.message} (blocked by CORS?)`, true));
   }
 
-  function addMention(text, isReply, sender, bodyText) {
+  function addMention(m) {
     if (!ui.mentions) return;
     const now = new Date();
     const time = now.toLocaleTimeString(); // local clock
-    // Prefer the message pulled straight from the DOM; fall back to trimming
-    // the sender off the rendered line.
-    const body = bodyText || splitMessage(text, sender);
+    const body = m.body || '(no text)';
+    const prefix = m.kind === 'reply' ? '↩ ' : m.kind === 'quote' ? '❝ ' : '';
+    const reUser = m.kind === 'quote' && m.rep && m.rep.user ? ` (re: @${m.rep.user})` : '';
 
     const div = document.createElement('div');
-    div.className = 'kac-men-item' + (isReply ? ' reply' : '');
+    div.className = 'kac-men-item ' + m.kind;
     // Built from separate spans with textContent, so chat text can't inject markup.
     const tEl = document.createElement('span');
     tEl.className = 'kac-men-t';
@@ -1494,11 +1539,18 @@
     div.appendChild(tEl);
     const sEl = document.createElement('span');
     sEl.className = 'kac-men-s';
-    sEl.textContent = `${isReply ? '↩ ' : ''}${sender || '?'}: `;
+    sEl.textContent = `${prefix}${m.sender || '?'}${reUser}: `;
     div.appendChild(sEl);
     const bEl = document.createElement('span');
     bEl.textContent = body;
     div.appendChild(bEl);
+    // For a quote match, show what was quoted — that's where your name was.
+    if (m.kind === 'quote' && m.rep && m.rep.quote) {
+      const qEl = document.createElement('div');
+      qEl.className = 'kac-men-q';
+      qEl.textContent = '↳ ' + m.rep.quote.slice(0, 140);
+      div.appendChild(qEl);
+    }
     ui.mentions.appendChild(div);
     ui.mentions.scrollTop = ui.mentions.scrollHeight;
     while (ui.mentions.childNodes.length > 60) ui.mentions.removeChild(ui.mentions.firstChild);
@@ -1508,28 +1560,32 @@
     if (settings.watchSound) beep();
     postWebhook({
       channel: currentChannel(),
-      sender: sender || '',
+      sender: m.sender || '',
       message: body,
-      isReply: !!isReply,
-      text,
-      ts: now.toISOString(),        // UTC, machine-readable
-      tsLocal: now.toLocaleString(), // your local date + time
+      kind: m.kind,                        // 'mention' | 'reply' | 'quote'
+      isReply: m.kind === 'reply',
+      replyTo: m.rep ? m.rep.user : '',
+      replyQuote: m.rep ? m.rep.quote : '',
+      ts: now.toISOString(),               // UTC, machine-readable
+      tsLocal: now.toLocaleString(),       // your local date + time
     });
   }
 
-  function processChatLine(target, name) {
-    const text = lineText(target);
-    if (!text || text.length > 600) return;
-    const m = matchesMention(text, name);
-    if (!m.hit) return;
-    const sig = text.slice(0, 180);
-    if (recentMentions.has(sig)) return;
-    recentMentions.add(sig);
-    while (recentMentions.size > 80) recentMentions.delete(recentMentions.values().next().value);
+  function processChatLine(target, name, idx) {
     const sender = extractSender(target);
     if (sender && sender.toLowerCase() === name.toLowerCase()) return; // your own message
     if (isIgnoredSender(sender)) return; // bots / muted senders
-    addMention(text, m.isReply, sender, extractBody(target));
+
+    const c = classifyLine(target, name);
+    if (!c.hit) return;
+
+    // Keyed by line index, so identical text from the same person still logs.
+    const sig = idx + '|' + (c.body || '').slice(0, 120);
+    if (recentMentions.has(sig)) return;
+    recentMentions.add(sig);
+    while (recentMentions.size > 80) recentMentions.delete(recentMentions.values().next().value);
+
+    addMention({ kind: c.kind, sender, body: c.body, rep: c.rep });
   }
 
   // Kick renders chat as a VIRTUALISED list of div[data-index="N"] wrappers, but
@@ -1546,17 +1602,6 @@
     });
     out.sort((a, b) => a.idx - b.idx);
     return out;
-  }
-
-  // Text of a chat line with Kick's own timestamp span stripped out.
-  function lineText(el) {
-    try {
-      const c = el.cloneNode(true);
-      c.querySelectorAll('span[style*="chatroom-timestamps-display"]').forEach((n) => n.remove());
-      return (c.textContent || '').replace(/\s+/g, ' ').trim();
-    } catch (e) {
-      return (el.textContent || '').replace(/\s+/g, ' ').trim();
-    }
   }
 
   // Poll the rendered chat lines once a second. Simpler and far more robust than
@@ -1581,7 +1626,7 @@
     for (const { el, idx } of lines) {
       if (idx <= maxChatIndex) continue; // already seen, or an old row re-rendered
       maxChatIndex = idx;
-      processChatLine(el, name);
+      processChatLine(el, name, idx);
     }
   }
 
