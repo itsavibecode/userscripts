@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.10.1
+// @version      0.11.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -44,6 +44,10 @@
     watchEnabled: false,    // watch chat for @mentions / replies to your username
     watchUsername: '',      // your own Kick username (exact)
     watchSound: true,       // beep on a new mention
+    // Senders the watcher skips (comma-separated). Pre-filled with the usual
+    // Kick bots — the points bot answering !claim would otherwise ping you
+    // every time. Fully editable; add whatever you like.
+    ignoreSenders: 'Botrix, StreamElements, Fossabot, Nightbot',
     running: false,
     collapsed: false,
     logOpen: true,             // activity-log drawer open (side-by-side) vs hidden
@@ -630,6 +634,11 @@
               title="Type your exact Kick username WITHOUT the @ (it's shown for you). The watcher flags any chat message containing @thisname or a reply to it." />
           </div>
         </div>
+        <div class="kac-row">
+          <label title="Usernames the watcher will skip, separated by commas. Their messages never count as mentions — mainly for chat bots (e.g. the points bot that replies to !claim and would otherwise ping you every time). The @ is optional and matching ignores capitalisation. Add or remove any names you like.">Ignore senders (comma-separated) <span class="kac-q">?</span></label>
+          <input type="text" id="kac-watch-ignore" placeholder="e.g. Botrix, StreamElements"
+            title="Comma-separated usernames to ignore. Messages from these senders are never logged as mentions. The @ is optional; matching is case-insensitive. Leave empty to catch everyone." />
+        </div>
         <label class="kac-check"
           title="Play a short beep when a new mention arrives.">
           <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
@@ -700,6 +709,7 @@
       watchBtn: p.querySelector('#kac-watch-btn'),
       watchStatus: p.querySelector('#kac-watch-status'),
       watchUser: p.querySelector('#kac-watch-user'),
+      watchIgnore: p.querySelector('#kac-watch-ignore'),
       watchSound: p.querySelector('#kac-watch-sound'),
       tabLog: p.querySelector('#kac-tab-log'),
       tabMen: p.querySelector('#kac-tab-men'),
@@ -736,6 +746,7 @@
     ui.secUnit.value = settings.secondUnit;
     ui.secWrap.classList.toggle('hidden', !settings.secondEnabled);
     ui.watchUser.value = settings.watchUsername;
+    ui.watchIgnore.value = settings.ignoreSenders;
     ui.watchSound.checked = settings.watchSound;
     syncWatchControls();
     setTab('log');
@@ -828,6 +839,10 @@
       // running yet (e.g. the field was empty before), or stop it if cleared.
       applyWatcher();
       syncWatchControls();
+    });
+    ui.watchIgnore.addEventListener('input', () => {
+      settings.ignoreSenders = ui.watchIgnore.value;
+      saveSettings(); // list is read live on each match, so nothing to restart
     });
     ui.watchSound.addEventListener('change', () => { settings.watchSound = ui.watchSound.checked; saveSettings(); });
     ui.tabLog.addEventListener('click', () => setTab('log'));
@@ -1126,6 +1141,20 @@
     return (settings.watchUsername || '').trim().replace(/^@+/, '');
   }
 
+  // Senders to skip (bots, etc.) — comma-separated, @ optional, case-insensitive.
+  function ignoredSenders() {
+    return (settings.ignoreSenders || '')
+      .split(',')
+      .map(s => s.trim().replace(/^@+/, '').toLowerCase())
+      .filter(Boolean);
+  }
+
+  function isIgnoredSender(sender) {
+    if (!sender) return false;
+    const s = sender.trim().replace(/^@+/, '').toLowerCase();
+    return ignoredSenders().includes(s);
+  }
+
   function matchesMention(text, name) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (new RegExp('@' + esc + '\\b', 'i').test(text)) {
@@ -1180,6 +1209,7 @@
     while (recentMentions.size > 80) recentMentions.delete(recentMentions.values().next().value);
     const sender = extractSender(node);
     if (sender && sender.toLowerCase() === name.toLowerCase()) return; // your own message
+    if (isIgnoredSender(sender)) return; // bots / muted senders
     addMention(text, m.isReply);
   }
 
@@ -1262,9 +1292,15 @@
 
     // Mention watcher.
     const wn = watchName();
-    lines.push(settings.watchEnabled && wn
-      ? `Watching chat for @${wn} — mentions/replies go to the Mentions tab${settings.watchSound ? ' with a beep' : ' (no sound)'}.`
-      : `Mention watcher OFF — chat is not being read.`);
+    if (settings.watchEnabled && wn) {
+      lines.push(`Watching chat for @${wn} — mentions/replies go to the Mentions tab${settings.watchSound ? ' with a beep' : ' (no sound)'}.`);
+      const ign = ignoredSenders();
+      lines.push(ign.length
+        ? `Ignoring ${ign.length} sender${ign.length === 1 ? '' : 's'}: ${ign.join(', ')}.`
+        : `No ignored senders — bots that tag you will also show up.`);
+    } else {
+      lines.push(`Mention watcher OFF — chat is not being read.`);
+    }
 
     // Current state.
     lines.push(settings.running
