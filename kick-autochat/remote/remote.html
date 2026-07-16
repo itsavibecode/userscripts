@@ -32,6 +32,15 @@
   .go{background:var(--green);color:#0a0a0a}
   .halt{background:var(--red);color:#fff}
   .sec{background:#2a2a30;color:var(--fg)}
+  /* Waiting for the PC to confirm: sweep a highlight across the button so it's
+     obvious the tap registered and something is in flight. */
+  .pending{position:relative;overflow:hidden}
+  .pending::after{content:'';position:absolute;inset:0;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);
+    transform:translateX(-100%);animation:sweep .85s linear infinite}
+  @keyframes sweep{to{transform:translateX(100%)}}
+  .pending.timeout{background:var(--amber);color:#0a0a0a}
+  .pending.timeout::after{animation:none;background:none}
   .row{display:flex;gap:8px;margin-bottom:8px}
   .row button{margin:0}
   .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:8px}
@@ -94,7 +103,10 @@
   let tab = 'log';
   let st = null;         // last state from the PC
   let connected = false;
-  let busyUntil = 0;     // brief pause after a command so the UI doesn't flicker back
+  // A command in flight. There's an unavoidable round trip (we queue it, the PC
+  // collects it on its next sync, then reports back), so rather than guess we
+  // show the button as working until the PC's own state proves it landed.
+  let pending = null;    // {id, cmd, label, check(st), at}
 
   async function post(cmd) {
     try {
@@ -103,9 +115,37 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cmd }),
       });
-      // The PC pushes state every ~2s; ignore stale snapshots until it catches up.
-      busyUntil = Date.now() + 2500;
     } catch (e) { /* server gone; the next poll will show disconnected */ }
+  }
+
+  // check(st) returns true once the PC's state reflects the command.
+  function press(id, cmd, label, check) {
+    pending = { id, cmd, label, check, at: Date.now() };
+    render();
+    post(cmd);
+    poll(); // don't wait for the next tick
+  }
+
+  function settlePending() {
+    if (!pending || !st) return;
+    if (pending.check(st)) { pending = null; return; }
+    // Nothing after ~8s means it never landed — surface that instead of
+    // sweeping forever.
+    if (Date.now() - pending.at > 8000) pending.failed = true;
+  }
+
+  // Paint a button, accounting for a command in flight on it.
+  function paint(id, text, cls) {
+    const b = $(id);
+    if (pending && pending.id === id) {
+      b.textContent = pending.failed ? 'No response — retry' : pending.label;
+      b.className = cls + ' pending' + (pending.failed ? ' timeout' : '');
+      b.disabled = !pending.failed;
+    } else {
+      b.textContent = text;
+      b.className = cls;
+      b.disabled = false;
+    }
   }
 
   async function poll() {
@@ -137,6 +177,7 @@
   }
 
   function render() {
+    settlePending();
     $('dot').classList.toggle('on', connected && st && st.running);
     $('ver').textContent = st && st.version ? 'v' + st.version : '';
 
@@ -149,8 +190,6 @@
         'Make sure the kick.com tab is open and Remote control is enabled in the panel.</div>';
       return;
     }
-
-    for (const id of ['toggle', 'sendNow', 'watchBtn']) $(id).disabled = false;
 
     if (st.running && !st.onTarget) {
       big.className = 'big paused';
@@ -176,13 +215,9 @@
       $('secRow').hidden = true;
     }
 
-    const t = $('toggle');
-    t.textContent = st.running ? 'Stop' : 'Start';
-    t.className = st.running ? 'halt' : 'go';
-
-    const w = $('watchBtn');
-    w.textContent = st.watching ? 'Stop watching' : 'Start watching';
-    w.className = st.watching ? 'halt' : 'sec';
+    paint('toggle', st.running ? 'Stop' : 'Start', st.running ? 'halt' : 'go');
+    paint('sendNow', 'Send now', 'sec');
+    paint('watchBtn', st.watching ? 'Stop watching' : 'Start watching', st.watching ? 'halt' : 'sec');
 
     const b = $('menBadge');
     if (st.unread > 0) { b.textContent = st.unread > 99 ? '99+' : st.unread; b.style.display = 'inline-block'; }
@@ -244,14 +279,33 @@
     renderList();
   }
 
-  $('toggle').onclick = () => { post(st && st.running ? 'stop' : 'start'); };
-  $('sendNow').onclick = () => post('sendNow');
-  $('watchBtn').onclick = () => post(st && st.watching ? 'watchOff' : 'watchOn');
+  $('toggle').onclick = () => {
+    if (!st) return;
+    const want = !st.running;
+    press('toggle', want ? 'start' : 'stop', want ? 'Starting…' : 'Stopping…',
+      (s) => s.running === want);
+  };
+  $('sendNow').onclick = () => {
+    if (!st) return;
+    // Confirmed by the sent counter ticking up — real proof it went out.
+    const base = st.sendCount;
+    press('sendNow', 'sendNow', 'Sending…', (s) => s.sendCount > base);
+  };
+  $('watchBtn').onclick = () => {
+    if (!st) return;
+    const want = !st.watching;
+    press('watchBtn', want ? 'watchOn' : 'watchOff', want ? 'Starting…' : 'Stopping…',
+      (s) => s.watching === want);
+  };
   $('tabLog').onclick = () => setTab('log');
   $('tabMen').onclick = () => setTab('men');
 
-  poll();
-  setInterval(() => { if (Date.now() > busyUntil) poll(); }, 1500);
+  // Poll harder while a command is in flight so confirmation feels immediate,
+  // then back off to keep the phone quiet.
+  (async function loop() {
+    await poll();
+    setTimeout(loop, pending ? 350 : 1200);
+  })();
 })();
 </script>
 </body>

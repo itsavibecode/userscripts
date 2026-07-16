@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.28.0
+// @version      0.28.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -1882,8 +1882,12 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const d = await r.json();
       if (remoteOk !== true) { remoteOk = true; updateRemoteStatus(); log(`Remote: connected on port ${port}.`); }
-      for (const cmd of d.commands || []) applyRemoteCommand(cmd);
+      const cmds = d.commands || [];
+      for (const cmd of cmds) applyRemoteCommand(cmd);
       updateStatus();
+      // Having just acted on a command, push the resulting state straight back
+      // so the phone's button confirms without waiting for the next tick.
+      if (cmds.length) setTimeout(remoteSync, 120);
     } catch (e) {
       if (remoteOk !== false) { remoteOk = false; updateRemoteStatus(); }
     }
@@ -1891,7 +1895,9 @@
 
   function applyRemote() {
     if (settings.remoteEnabled) {
-      if (!remoteTimer) { remoteTimer = setInterval(remoteSync, 2000); remoteSync(); }
+      // 1s: it's a localhost round trip, so this is cheap and halves the worst
+      // case wait before a phone command gets picked up.
+      if (!remoteTimer) { remoteTimer = setInterval(remoteSync, 1000); remoteSync(); }
     } else if (remoteTimer) {
       clearInterval(remoteTimer);
       remoteTimer = null;
