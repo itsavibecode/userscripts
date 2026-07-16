@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.17.0
+// @version      0.18.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -44,6 +44,7 @@
     watchEnabled: false,    // watch chat for @mentions / replies to your username
     watchUsername: '',      // your own Kick username (exact)
     watchSound: true,       // beep on a new mention
+    watchBareName: false,   // also match your username with no @ in front
     // Senders the watcher skips (comma-separated). Pre-filled with the usual
     // Kick bots — the points bot answering !claim would otherwise ping you
     // every time. Fully editable; add whatever you like.
@@ -492,7 +493,10 @@
         display:flex;flex-direction:column;gap:8px;background:#0f0f12}
       .kac-set-h{font-size:9.5px;font-weight:700;letter-spacing:.4px;color:#9a9aa3}
       .kac-men-item{color:#e7e7ea;padding:3px 4px;border-bottom:1px solid #16161b;word-break:break-word}
-      .kac-men-item.reply{color:#9ad4ff}
+      .kac-men-item.reply{border-left:2px solid #9ad4ff;padding-left:4px}
+      .kac-men-t{color:#6f6f78}
+      .kac-men-s{color:#53fc18;font-weight:700}
+      .kac-men-item.reply .kac-men-s{color:#9ad4ff}
       #kac-logtab{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:12px;padding:0 4px}
       #kac-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:move;
         background:linear-gradient(90deg,#1b2f1b,#13131a);border-bottom:1px solid #2a2a30}
@@ -739,6 +743,9 @@
           <label class="kac-check"
             title="Play a short beep when a new mention arrives.">
             <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
+          <label class="kac-check"
+            title="OFF (default): only @yourname and replies to you count. ON: any message containing your bare username with no @ also counts. Great for a distinctive username, noisy if your name is a short or common word.">
+            <input type="checkbox" id="kac-watch-bare" /> Also match my name without @</label>
           <div class="kac-div"></div>
           <div class="kac-set-h">WEBHOOK</div>
           <label class="kac-check"
@@ -810,6 +817,7 @@
       watchUser: p.querySelector('#kac-watch-user'),
       watchIgnore: p.querySelector('#kac-watch-ignore'),
       watchSound: p.querySelector('#kac-watch-sound'),
+      watchBare: p.querySelector('#kac-watch-bare'),
       whEn: p.querySelector('#kac-wh-en'),
       whWrap: p.querySelector('#kac-wh-wrap'),
       whUrl: p.querySelector('#kac-wh-url'),
@@ -916,6 +924,10 @@
       saveSettings(); // list is read live on each match, so nothing to restart
     });
     ui.watchSound.addEventListener('change', () => { settings.watchSound = ui.watchSound.checked; saveSettings(); });
+    ui.watchBare.addEventListener('change', () => {
+      settings.watchBareName = ui.watchBare.checked;
+      saveSettings(); // matching reads this live — nothing to restart
+    });
     ui.whEn.addEventListener('change', () => {
       settings.webhookEnabled = ui.whEn.checked;
       ui.whWrap.classList.toggle('hidden', !settings.webhookEnabled);
@@ -936,6 +948,7 @@
         isReply: false,
         text: `test_user: test mention for @${watchName() || 'you'}`,
         ts: new Date().toISOString(),
+        tsLocal: new Date().toLocaleString(),
       });
       settings.webhookEnabled = wasEnabled;
     });
@@ -1044,6 +1057,7 @@
     ui.watchUser.value = settings.watchUsername;
     ui.watchIgnore.value = settings.ignoreSenders;
     ui.watchSound.checked = settings.watchSound;
+    ui.watchBare.checked = settings.watchBareName;
     ui.whEn.checked = settings.webhookEnabled;
     ui.whUrl.value = settings.webhookUrl;
     ui.whFmt.value = settings.webhookFormat;
@@ -1367,13 +1381,24 @@
     return ignoredSenders().includes(s);
   }
 
+  function escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
   function matchesMention(text, name) {
-    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const esc = escapeRe(name);
+    // A reply is only "to you" when your name sits right after "Replying to" —
+    // NOT merely because the line contains "replying to" somewhere and your
+    // name somewhere else (that's a reply to someone that mentions you).
+    const replyToMe = new RegExp('replying to\\s*@?' + esc + '\\b', 'i').test(text);
+
     if (new RegExp('@' + esc + '\\b', 'i').test(text)) {
-      return { hit: true, isReply: /replying to/i.test(text) };
+      return { hit: true, isReply: replyToMe };
     }
-    if (/replying to/i.test(text) && new RegExp('\\b' + esc + '\\b', 'i').test(text)) {
-      return { hit: true, isReply: true };
+    if (replyToMe) return { hit: true, isReply: true };
+    // Optional: your bare username with no @ anywhere in the message.
+    if (settings.watchBareName && new RegExp('\\b' + esc + '\\b', 'i').test(text)) {
+      return { hit: true, isReply: false };
     }
     return { hit: false };
   }
@@ -1412,7 +1437,7 @@
       const verb = data.isReply ? 'replied to you' : 'mentioned you';
       body = JSON.stringify({
         username: 'Kick Auto-Chat',
-        content: `**${who}** ${verb} in kick.com/${data.channel}:\n> ${data.message}`,
+        content: `**${who}** ${verb} in kick.com/${data.channel} — ${data.tsLocal}\n> ${data.message}`,
         // Never let a chat message trigger @everyone/@here pings in Discord.
         allowed_mentions: { parse: [] },
       });
@@ -1427,10 +1452,24 @@
 
   function addMention(text, isReply, sender) {
     if (!ui.mentions) return;
-    const t = new Date().toLocaleTimeString();
+    const now = new Date();
+    const time = now.toLocaleTimeString(); // local clock
+    const body = splitMessage(text, sender);
+
     const div = document.createElement('div');
     div.className = 'kac-men-item' + (isReply ? ' reply' : '');
-    div.textContent = `[${t}] ${isReply ? '↩ ' : ''}${text}`;
+    // Built from separate spans with textContent, so chat text can't inject markup.
+    const tEl = document.createElement('span');
+    tEl.className = 'kac-men-t';
+    tEl.textContent = `[${time}] `;
+    div.appendChild(tEl);
+    const sEl = document.createElement('span');
+    sEl.className = 'kac-men-s';
+    sEl.textContent = `${isReply ? '↩ ' : ''}${sender || '?'}: `;
+    div.appendChild(sEl);
+    const bEl = document.createElement('span');
+    bEl.textContent = body;
+    div.appendChild(bEl);
     ui.mentions.appendChild(div);
     ui.mentions.scrollTop = ui.mentions.scrollHeight;
     while (ui.mentions.childNodes.length > 60) ui.mentions.removeChild(ui.mentions.firstChild);
@@ -1441,10 +1480,11 @@
     postWebhook({
       channel: currentChannel(),
       sender: sender || '',
-      message: splitMessage(text, sender),
+      message: body,
       isReply: !!isReply,
       text,
-      ts: new Date().toISOString(),
+      ts: now.toISOString(),        // UTC, machine-readable
+      tsLocal: now.toLocaleString(), // your local date + time
     });
   }
 
@@ -1597,7 +1637,7 @@
     // Mention watcher.
     const wn = watchName();
     if (settings.watchEnabled && wn) {
-      lines.push(`Watching chat for @${wn} — mentions/replies go to the Mentions tab${settings.watchSound ? ' with a beep' : ' (no sound)'}.`);
+      lines.push(`Watching chat for ${settings.watchBareName ? `@${wn} OR bare "${wn}"` : `@${wn}`} — mentions/replies go to the Mentions tab${settings.watchSound ? ' with a beep' : ' (no sound)'}.`);
       const ign = ignoredSenders();
       lines.push(ign.length
         ? `Ignoring ${ign.length} sender${ign.length === 1 ? '' : 's'}: ${ign.join(', ')}.`
