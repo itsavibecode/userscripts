@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.13.0
+// @version      0.14.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -526,6 +526,8 @@
       #kac-toggle.start{background:#53fc18;color:#0a0a0a}
       #kac-toggle.stop{background:#ff4757;color:#fff}
       #kac-now{background:#2a2a30;color:#e7e7ea}
+      .kac-btn-sm{background:#2a2a30;color:#e7e7ea;font-size:10px;padding:6px;font-weight:600}
+      .kac-btn-sm:hover{background:#35353d}
       #kac-status{font-size:11px;color:#9a9aa3;min-height:14px}
       #kac-status b{color:#53fc18}
       #kac-watch-btn{background:#53fc18;color:#0a0a0a}
@@ -696,6 +698,14 @@
           title="Live status: shows whether it's running, the countdown to the next send, and how many messages have been sent this session."></div>
         <div id="kac-explain"
           title="Plain-English summary of exactly what your current settings will do. Updates live as you change anything."></div>
+        <div class="kac-div"></div>
+        <div class="kac-btns">
+          <button class="kac-btn kac-btn-sm" id="kac-export"
+            title="Save every setting (target, messages, timings, keywords, scheduled message, watcher, webhook) to a .json file you can keep as a backup. NOTE: the file includes your webhook URL — keep it private.">Backup settings</button>
+          <button class="kac-btn kac-btn-sm" id="kac-import"
+            title="Load a previously saved .json backup and apply it. Sending is left stopped afterwards so nothing fires unexpectedly — press Start when ready.">Restore</button>
+        </div>
+        <input type="file" id="kac-import-file" accept="application/json,.json" style="display:none" />
         <div id="kac-foot"
           title="Installed script version. Update via Tampermonkey - Check for userscript updates.">v<span id="kac-ver">?</span></div>
       </div>
@@ -765,6 +775,9 @@
       now: p.querySelector('#kac-now'),
       status: p.querySelector('#kac-status'),
       explain: p.querySelector('#kac-explain'),
+      exportBtn: p.querySelector('#kac-export'),
+      importBtn: p.querySelector('#kac-import'),
+      importFile: p.querySelector('#kac-import-file'),
       log: p.querySelector('#kac-log'),
       resize: p.querySelector('#kac-resize'),
     };
@@ -773,44 +786,8 @@
     const verEl = p.querySelector('#kac-ver');
     if (verEl) verEl.textContent = VERSION;
 
-    // Restore values
-    ui.target.value = settings.targetChannel;
-    ui.msg.value = settings.message;
-    ui.int.value = settings.intervalSec;
-    ui.cool.value = settings.cooldownSec;
-    ui.rand.checked = settings.randomize;
-    ui.intMax.value = settings.intervalMaxSec;
-    ui.coolMax.value = settings.cooldownMaxSec;
-    ui.intMaxCell.classList.toggle('hidden', !settings.randomize);
-    ui.coolMaxCell.classList.toggle('hidden', !settings.randomize);
-    updateRandLabels();
-    ui.dup.checked = settings.antiDup;
-    ui.rotate.value = settings.rotateKeywords;
-    ui.secEn.checked = settings.secondEnabled;
-    ui.secMsg.value = settings.secondMessage;
-    ui.secVal.value = settings.secondValue;
-    ui.secUnit.value = settings.secondUnit;
-    ui.secWrap.classList.toggle('hidden', !settings.secondEnabled);
-    ui.watchUser.value = settings.watchUsername;
-    ui.watchIgnore.value = settings.ignoreSenders;
-    ui.watchSound.checked = settings.watchSound;
-    ui.whEn.checked = settings.webhookEnabled;
-    ui.whUrl.value = settings.webhookUrl;
-    ui.whFmt.value = settings.webhookFormat;
-    ui.whWrap.classList.toggle('hidden', !settings.webhookEnabled);
-    syncWatchControls();
+    applySettingsToUI();
     setTab('log');
-    updateMenBadge();
-    updateExplain();
-    ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
-    if (settings.pos.left != null) {
-      p.style.left = settings.pos.left + 'px';
-      p.style.top = settings.pos.top + 'px';
-      p.style.right = 'auto';
-    }
-    if (settings.collapsed) ui.body.classList.add('hidden');
-    applySize();
-    applyDrawer();
 
     // Wire events
     ui.target.addEventListener('input', () => {
@@ -932,6 +909,13 @@
         ui.log.textContent = '';
       }
     });
+    ui.exportBtn.addEventListener('click', exportSettings);
+    ui.importBtn.addEventListener('click', () => ui.importFile.click());
+    ui.importFile.addEventListener('change', () => {
+      const f = ui.importFile.files && ui.importFile.files[0];
+      if (f) importSettingsFile(f);
+      ui.importFile.value = ''; // let the same file be picked again
+    });
     ui.toggle.addEventListener('click', () => settings.running ? stop() : start());
     ui.now.addEventListener('click', sendNow);
     ui.logtab.addEventListener('click', () => {
@@ -983,6 +967,47 @@
       settings.pos = { left: Math.round(r.left), top: Math.round(r.top) };
       saveSettings();
     });
+  }
+
+  // Push every value in `settings` into the controls. Used on first build and
+  // again after restoring a backup, so there's one place that maps state -> UI.
+  function applySettingsToUI() {
+    ui.target.value = settings.targetChannel;
+    ui.msg.value = settings.message;
+    ui.int.value = settings.intervalSec;
+    ui.cool.value = settings.cooldownSec;
+    ui.rand.checked = settings.randomize;
+    ui.intMax.value = settings.intervalMaxSec;
+    ui.coolMax.value = settings.cooldownMaxSec;
+    ui.intMaxCell.classList.toggle('hidden', !settings.randomize);
+    ui.coolMaxCell.classList.toggle('hidden', !settings.randomize);
+    updateRandLabels();
+    ui.dup.checked = settings.antiDup;
+    ui.rotate.value = settings.rotateKeywords;
+    ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
+    ui.secEn.checked = settings.secondEnabled;
+    ui.secMsg.value = settings.secondMessage;
+    ui.secVal.value = settings.secondValue;
+    ui.secUnit.value = settings.secondUnit;
+    ui.secWrap.classList.toggle('hidden', !settings.secondEnabled);
+    ui.watchUser.value = settings.watchUsername;
+    ui.watchIgnore.value = settings.ignoreSenders;
+    ui.watchSound.checked = settings.watchSound;
+    ui.whEn.checked = settings.webhookEnabled;
+    ui.whUrl.value = settings.webhookUrl;
+    ui.whFmt.value = settings.webhookFormat;
+    ui.whWrap.classList.toggle('hidden', !settings.webhookEnabled);
+    syncWatchControls();
+    updateMenBadge();
+    updateExplain();
+    if (settings.pos.left != null) {
+      ui.panel.style.left = settings.pos.left + 'px';
+      ui.panel.style.top = settings.pos.top + 'px';
+      ui.panel.style.right = 'auto';
+    }
+    ui.body.classList.toggle('hidden', settings.collapsed);
+    applySize();
+    applyDrawer();
   }
 
   // Apply the saved size to the controls column. Height is only applied when
@@ -1362,6 +1387,57 @@
   function applyWatcher() {
     if (settings.watchEnabled && watchName()) startWatcher();
     else stopWatcher();
+  }
+
+  // ----------------------------------------------------------------------
+  // Backup / restore — export every setting to a JSON file and read it back.
+  // ----------------------------------------------------------------------
+  function exportSettings() {
+    try {
+      const blob = new Blob([JSON.stringify(settings, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `kick-autochat-settings-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      log('Settings backed up to file.');
+    } catch (e) {
+      log(`Backup failed: ${e.message}`, true);
+    }
+  }
+
+  function importSettingsFile(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('that file is not a settings backup');
+        }
+        // Merge over DEFAULTS so an older/partial backup can't leave holes.
+        const merged = { ...DEFAULTS, ...parsed };
+        if (!merged.pos || typeof merged.pos !== 'object') merged.pos = { left: null, top: null };
+        if (!merged.size || typeof merged.size !== 'object') merged.size = { w: null, h: null };
+        merged.running = false; // never auto-start sending straight off a restore
+
+        stop();
+        Object.keys(settings).forEach((k) => delete settings[k]);
+        Object.assign(settings, merged);
+        saveSettings();
+        applySettingsToUI();
+        applyWatcher();
+        syncControls();
+        updateStatus();
+        log('Settings restored from file — press Start when ready.');
+      } catch (e) {
+        log(`Restore failed: ${e.message}`, true);
+      }
+    };
+    reader.onerror = () => log('Restore failed: could not read that file.', true);
+    reader.readAsText(file);
   }
 
   // ----------------------------------------------------------------------
