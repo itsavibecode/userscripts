@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.15.0
+// @version      0.16.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -53,6 +53,7 @@
     webhookFormat: 'discord', // 'discord' | 'json'
     running: false,
     collapsed: false,
+    explainOpen: true,         // "What will happen" summary expanded
     logOpen: true,             // activity-log drawer open (side-by-side) vs hidden
     pos: { left: null, top: null },
     size: { w: null, h: null }, // controls width/height in px once the user resizes
@@ -547,10 +548,13 @@
       #kac-log{font-size:10.5px;color:#7d7d85;background:#0a0a0d;
         padding:6px;flex:1 1 auto;min-height:0;overflow:auto;white-space:pre-wrap}
       #kac-log .err{color:#ff7b7b}
-      #kac-explain{font-size:10px;color:#8a8a93;background:#121216;border:1px solid #1d1d22;
-        border-radius:6px;padding:6px 7px;line-height:1.45;cursor:help}
-      #kac-explain div{padding:1px 0}
-      .kac-ex-h{color:#9a9aa3;font-weight:700;margin-bottom:2px}
+      #kac-explain{font-size:10px;line-height:1.45;border-radius:8px;padding:6px 7px;
+        background:rgba(255,184,77,.07);border:1px solid rgba(255,184,77,.30)}
+      #kac-explain-head{display:flex;align-items:center;justify-content:space-between;gap:6px;
+        color:#ffc266;font-weight:700;font-size:9.5px;letter-spacing:.4px;cursor:pointer;user-select:none}
+      #kac-explain-body{margin-top:4px;color:#cbb894}
+      #kac-explain-body.hidden{display:none}
+      #kac-explain-body div{padding:1px 0}
       #kac-foot{flex:0 0 auto;font-size:9.5px;color:#5a5a63;text-align:right;padding-right:14px;cursor:default}
       #kac-resize{position:absolute;right:2px;bottom:2px;width:15px;height:15px;cursor:nwse-resize;
         background:
@@ -720,8 +724,13 @@
         </div>
         <div id="kac-status"
           title="Live status: shows whether it's running, the countdown to the next send, and how many messages have been sent this session."></div>
-        <div id="kac-explain"
-          title="Plain-English summary of exactly what your current settings will do. Updates live as you change anything."></div>
+        <div id="kac-explain">
+          <div id="kac-explain-head"
+            title="Plain-English summary of exactly what your current settings will do. Updates live as you change anything. Click to collapse or expand — the state is remembered.">
+            <span>WHAT WILL HAPPEN</span><span id="kac-explain-arrow">▾</span>
+          </div>
+          <div id="kac-explain-body"></div>
+        </div>
         <div class="kac-div"></div>
         <div class="kac-btns">
           <button class="kac-btn kac-btn-sm" id="kac-export"
@@ -805,6 +814,9 @@
       now: p.querySelector('#kac-now'),
       status: p.querySelector('#kac-status'),
       explain: p.querySelector('#kac-explain'),
+      explainHead: p.querySelector('#kac-explain-head'),
+      explainBody: p.querySelector('#kac-explain-body'),
+      explainArrow: p.querySelector('#kac-explain-arrow'),
       exportBtn: p.querySelector('#kac-export'),
       importBtn: p.querySelector('#kac-import'),
       importFile: p.querySelector('#kac-import-file'),
@@ -928,6 +940,11 @@
         ui.log.textContent = '';
       }
     });
+    ui.explainHead.addEventListener('click', () => {
+      settings.explainOpen = !settings.explainOpen;
+      applyExplain();
+      saveSettings();
+    });
     ui.exportBtn.addEventListener('click', exportSettings);
     ui.importBtn.addEventListener('click', () => ui.importFile.click());
     ui.importFile.addEventListener('change', () => {
@@ -1020,6 +1037,7 @@
     syncWatchControls();
     updateMenBadge();
     updateExplain();
+    applyExplain();
     if (settings.pos.left != null) {
       ui.panel.style.left = settings.pos.left + 'px';
       ui.panel.style.top = settings.pos.top + 'px';
@@ -1582,17 +1600,20 @@
   }
 
   function updateExplain() {
-    if (!ui || !ui.explain) return;
-    ui.explain.textContent = '';
-    const h = document.createElement('div');
-    h.className = 'kac-ex-h';
-    h.textContent = 'What will happen';
-    ui.explain.appendChild(h);
+    if (!ui || !ui.explainBody) return;
+    ui.explainBody.textContent = '';
     for (const l of explainLines()) {
       const d = document.createElement('div');
       d.textContent = '• ' + l; // textContent: user-typed messages can't inject markup
-      ui.explain.appendChild(d);
+      ui.explainBody.appendChild(d);
     }
+  }
+
+  // Collapse/expand state of the summary box.
+  function applyExplain() {
+    if (!ui.explainBody) return;
+    ui.explainBody.classList.toggle('hidden', !settings.explainOpen);
+    if (ui.explainArrow) ui.explainArrow.textContent = settings.explainOpen ? '▾' : '▸';
   }
 
   // ----------------------------------------------------------------------
