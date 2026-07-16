@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.9.3
+// @version      0.10.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -64,6 +64,9 @@
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify(settings));
     } catch (e) { /* ignore quota errors */ }
+    // Every settings change flows through here, so this keeps the live
+    // "What will happen" summary in sync with the controls.
+    updateExplain();
   }
 
   const settings = loadSettings();
@@ -482,7 +485,8 @@
       #kac-head .dot.on{background:#53fc18;box-shadow:0 0 8px #53fc18}
       #kac-title{font-weight:700;letter-spacing:.3px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       #kac-collapse{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:14px;padding:0 2px}
-      #kac-body{padding:10px;display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0;overflow:hidden}
+      #kac-body{padding:10px;display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0;
+        overflow-y:auto;overflow-x:hidden}
       #kac-body.hidden{display:none}
       .kac-row.hidden{display:none}
       .kac-row{display:flex;flex-direction:column;gap:3px}
@@ -515,6 +519,10 @@
       #kac-log{font-size:10.5px;color:#7d7d85;background:#0a0a0d;
         padding:6px;flex:1 1 auto;min-height:0;overflow:auto;white-space:pre-wrap}
       #kac-log .err{color:#ff7b7b}
+      #kac-explain{font-size:10px;color:#8a8a93;background:#121216;border:1px solid #1d1d22;
+        border-radius:6px;padding:6px 7px;line-height:1.45;cursor:help}
+      #kac-explain div{padding:1px 0}
+      .kac-ex-h{color:#9a9aa3;font-weight:700;margin-bottom:2px}
       #kac-foot{flex:0 0 auto;font-size:9.5px;color:#5a5a63;text-align:right;padding-right:14px;cursor:default}
       #kac-resize{position:absolute;right:2px;bottom:2px;width:15px;height:15px;cursor:nwse-resize;
         background:
@@ -635,6 +643,8 @@
         </div>
         <div id="kac-status"
           title="Live status: shows whether it's running, the countdown to the next send, and how many messages have been sent this session."></div>
+        <div id="kac-explain"
+          title="Plain-English summary of exactly what your current settings will do. Updates live as you change anything."></div>
         <div id="kac-foot"
           title="Installed script version. Update via Tampermonkey - Check for userscript updates.">v<span id="kac-ver">?</span></div>
       </div>
@@ -694,6 +704,7 @@
       toggle: p.querySelector('#kac-toggle'),
       now: p.querySelector('#kac-now'),
       status: p.querySelector('#kac-status'),
+      explain: p.querySelector('#kac-explain'),
       log: p.querySelector('#kac-log'),
       resize: p.querySelector('#kac-resize'),
     };
@@ -724,6 +735,7 @@
     syncWatchControls();
     setTab('log');
     updateMenBadge();
+    updateExplain();
     ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
     if (settings.pos.left != null) {
       p.style.left = settings.pos.left + 'px';
@@ -1187,6 +1199,76 @@
   function applyWatcher() {
     if (settings.watchEnabled && watchName()) startWatcher();
     else stopWatcher();
+  }
+
+  // ----------------------------------------------------------------------
+  // "What will happen" — a plain-English summary of the current settings,
+  // rebuilt on every change so the GUI explains itself in real time.
+  // ----------------------------------------------------------------------
+  function explainLines() {
+    const lines = [];
+    const lo = (a, b) => Math.min(a, b), hi = (a, b) => Math.max(a, b);
+
+    // Where it will chat.
+    const t = targetChannel();
+    lines.push(t
+      ? `Chats ONLY on kick.com/${t} — paused on every other channel/tab.`
+      : `No target channel set — nothing will send.`);
+
+    // How often.
+    const iv = settings.randomize
+      ? `every ${lo(settings.intervalSec, settings.intervalMaxSec)}–${hi(settings.intervalSec, settings.intervalMaxSec)}s (re-rolled each time)`
+      : `every ${settings.intervalSec}s`;
+    const cd = settings.randomize
+      ? `${lo(settings.cooldownSec, settings.cooldownMaxSec)}–${hi(settings.cooldownSec, settings.cooldownMaxSec)}s`
+      : `${settings.cooldownSec}s`;
+    lines.push(`Sends ${iv}, and never two sends closer than ${cd} apart.`);
+
+    // What it sends.
+    const pool = rotationPool();
+    if (pool.length > 1) {
+      lines.push(settings.randomize
+        ? `Picks at random from ${pool.length} messages, never the same one twice in a row.`
+        : `Cycles in order through ${pool.length} messages, looping back to the start.`);
+    } else {
+      lines.push(`Always sends the same message: "${pool[0]}".`);
+    }
+    lines.push(settings.antiDup
+      ? `Anti-duplicate ON — adds an invisible character so Kick won't reject repeats.`
+      : `Anti-duplicate OFF — Kick may block identical back-to-back messages, and rotation keywords are ignored.`);
+
+    // Scheduled message.
+    const sm = (settings.secondMessage || '').trim();
+    lines.push(settings.secondEnabled && sm
+      ? `Also sends "${sm}" every ${settings.secondValue} ${settings.secondUnit}, exactly as typed — it wins if both are due at once.`
+      : `Scheduled message OFF — nothing extra is sent.`);
+
+    // Mention watcher.
+    const wn = watchName();
+    lines.push(settings.watchEnabled && wn
+      ? `Watching chat for @${wn} — mentions/replies go to the Mentions tab${settings.watchSound ? ' with a beep' : ' (no sound)'}.`
+      : `Mention watcher OFF — chat is not being read.`);
+
+    // Current state.
+    lines.push(settings.running
+      ? `Status: RUNNING.`
+      : `Status: STOPPED — press Start to begin sending.`);
+
+    return lines;
+  }
+
+  function updateExplain() {
+    if (!ui || !ui.explain) return;
+    ui.explain.textContent = '';
+    const h = document.createElement('div');
+    h.className = 'kac-ex-h';
+    h.textContent = 'What will happen';
+    ui.explain.appendChild(h);
+    for (const l of explainLines()) {
+      const d = document.createElement('div');
+      d.textContent = '• ' + l; // textContent: user-typed messages can't inject markup
+      ui.explain.appendChild(d);
+    }
   }
 
   // ----------------------------------------------------------------------
