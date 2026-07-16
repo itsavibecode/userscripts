@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.20.1
+// @version      0.20.2
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -27,11 +27,6 @@
   // Persistent settings (localStorage, per-origin)
   // ----------------------------------------------------------------------
   const STORE_KEY = 'kick-autochat:settings';
-  // Bump when a DEFAULT changes in a way existing users should also receive.
-  // Saved settings always win over DEFAULTS (so updates never clobber your
-  // config), which means changed defaults never reach an existing install —
-  // migrations below are how we hand those out, exactly once.
-  const SCHEMA = 1;
   const DEFAULTS = {
     targetChannel: 'iceposeidon', // only sends on kick.com/<this>; paused everywhere else
     message: 'Cx',
@@ -53,7 +48,7 @@
     // Senders the watcher skips (comma-separated). Pre-filled with the usual
     // Kick bots — the points bot answering !claim would otherwise ping you
     // every time. Fully editable; add whatever you like.
-    ignoreSenders: 'ShoovyBot, Botrix, StreamElements, Fossabot, Nightbot',
+    ignoreSenders: 'Botrix, StreamElements, Fossabot, Nightbot',
     webhookEnabled: false,  // POST each mention to a webhook
     webhookUrl: '',         // Discord webhook URL, or any endpoint that accepts JSON
     webhookFormat: 'discord', // 'discord' | 'json'
@@ -63,39 +58,16 @@
     logOpen: true,             // activity-log drawer open (side-by-side) vs hidden
     pos: { left: null, top: null },
     size: { w: null, h: null }, // controls width/height in px once the user resizes
-    schema: SCHEMA,            // fresh installs already have every current default
   };
 
-  // Does a comma-separated list already contain this name?
-  function listHas(list, name) {
-    return String(list || '')
-      .split(',')
-      .some((x) => x.trim().replace(/^@+/, '').toLowerCase() === name.toLowerCase());
-  }
-
-  // One-time upgrades for installs saved before a default changed. `from` is the
-  // schema version that was actually stored, so each step runs at most once —
-  // if you later delete something a migration added, it stays deleted.
-  function migrate(s, from) {
-    if (from < 1) {
-      // ShoovyBot is a bot on iceposeidon that @-tags users (it answers !claim),
-      // so it would ping the mention watcher on every scheduled send.
-      if (!listHas(s.ignoreSenders, 'ShoovyBot')) {
-        s.ignoreSenders = 'ShoovyBot' + (s.ignoreSenders ? ', ' + s.ignoreSenders : '');
-      }
-    }
-    s.schema = SCHEMA;
-    return s;
-  }
-
+  // Your saved settings always win over DEFAULTS: an update never rewrites your
+  // config. A changed default therefore only affects a fresh install — curated
+  // fields (ignore list, keywords, messages) are yours to edit, not ours.
   function loadSettings() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
-      if (!raw) return { ...DEFAULTS }; // fresh install: DEFAULTS are already current
-      const parsed = JSON.parse(raw);
-      // Read the stored schema from the RAW object — merging with DEFAULTS would
-      // otherwise hand us the current version and skip every migration.
-      return migrate({ ...DEFAULTS, ...parsed }, parsed.schema || 0);
+      if (!raw) return { ...DEFAULTS };
+      return { ...DEFAULTS, ...JSON.parse(raw) };
     } catch (e) {
       return { ...DEFAULTS };
     }
@@ -1782,9 +1754,6 @@
   function boot() {
     injectStyles();
     buildPanel();
-    // Persist immediately so any migration sticks — otherwise it would re-run on
-    // every load, and anything you deliberately removed would keep coming back.
-    saveSettings();
     applyWatcher();
     if (settings.running) {
       // Resume after navigation/reload if it was left running.
