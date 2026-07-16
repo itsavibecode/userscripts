@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.14.0
+// @version      0.15.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -513,6 +513,16 @@
       .kac-g-int .kac-g-title{color:#7ee85a}
       .kac-g-cool{background:rgba(120,160,255,.07);border-color:rgba(120,160,255,.32)}
       .kac-g-cool .kac-g-title{color:#93b4ff}
+      .kac-g-read{font-size:10px;font-weight:700;margin-bottom:4px;line-height:1.35}
+      .kac-g-int .kac-g-read{color:#bdf5a8}
+      .kac-g-cool .kac-g-read{color:#c3d6ff}
+      .kac-mmss{display:flex;align-items:center;gap:4px;margin-top:5px}
+      .kac-mmss.hidden{display:none}
+      .kac-mmss-lbl{flex:0 0 34px;font-size:10px;color:#9a9aa3}
+      .kac-mmss input[type=number]{flex:1 1 auto;min-width:0;width:100%;box-sizing:border-box;
+        background:#17171c;border:1px solid #2a2a30;color:#e7e7ea;border-radius:6px;
+        padding:5px 4px;font:inherit;text-align:center}
+      .kac-u{flex:0 0 auto;font-size:10px;color:#9a9aa3}
       .kac-inat{display:flex;align-items:center;gap:2px;background:#17171c;border:1px solid #2a2a30;border-radius:6px;padding-left:8px}
       .kac-inat span{color:#9a9aa3;font-weight:700;font-size:12px}
       .kac-inat input[type=text]{border:none;background:transparent;flex:1 1 auto;width:auto;padding-left:2px}
@@ -580,35 +590,49 @@
           title="When on: (1) each send waits a RANDOM whole number of seconds between the Min and Max of each coloured group below, re-rolled every cycle; and (2) rotation keywords are sent in RANDOM order, never the same one twice in a row. Makes the bot look less robotic.">
           <input type="checkbox" id="kac-rand" /> Randomize timing &amp; keyword order</label>
         <div class="kac-group kac-g-int"
-          title="INTERVAL group — the two fields in this green box work together: each send waits a random number of seconds between Min and Max.">
+          title="INTERVAL group — how often it sends. Each row's minutes and seconds boxes ADD TOGETHER (2m + 32s = 2m 32s). The green readout above shows exactly what the script understands.">
           <div class="kac-g-title">INTERVAL — how often it sends</div>
-          <div class="kac-grid">
-            <div class="kac-row">
-              <label title="Low end of the interval range — pairs with the Max beside it. (With Randomize off this is simply the fixed interval.)"><span id="kac-int-lbl">Every (s)</span> <span class="kac-q">?</span></label>
-              <input type="number" id="kac-int" min="1" step="1"
-                title="How often it sends. With Randomize on this is the MINIMUM and pairs with the Max beside it. If lower than Cooldown, Cooldown wins." />
-            </div>
-            <div class="kac-row" id="kac-int-max-cell">
-              <label title="High end of the interval range — pairs with the Min beside it.">Max (s) <span class="kac-q">?</span></label>
-              <input type="number" id="kac-int-max" min="1" step="1"
-                title="Upper bound of the interval range. Each cycle picks a random whole number of seconds between Min and this value." />
-            </div>
+          <div class="kac-g-read" id="kac-int-read"></div>
+          <div class="kac-mmss">
+            <span class="kac-mmss-lbl" id="kac-int-lbl">Every</span>
+            <input type="number" id="kac-int-m" min="0" step="1"
+              title="Minutes part of the interval. Adds to the seconds box beside it." />
+            <span class="kac-u">m</span>
+            <input type="number" id="kac-int-s" min="0" max="59" step="1"
+              title="Seconds part of the interval. Adds to the minutes box beside it — 2m + 32s means 2 minutes 32 seconds. Over 59 rolls into minutes automatically." />
+            <span class="kac-u">s</span>
+          </div>
+          <div class="kac-mmss" id="kac-int-max-cell">
+            <span class="kac-mmss-lbl">Max</span>
+            <input type="number" id="kac-int-max-m" min="0" step="1"
+              title="Minutes part of the maximum interval. Adds to the seconds box beside it." />
+            <span class="kac-u">m</span>
+            <input type="number" id="kac-int-max-s" min="0" max="59" step="1"
+              title="Seconds part of the maximum interval. Each send picks a random time between the Min and Max rows." />
+            <span class="kac-u">s</span>
           </div>
         </div>
         <div class="kac-group kac-g-cool"
-          title="COOLDOWN group — the two fields in this blue box work together: the minimum gap between any two sends is a random number of seconds between Min and Max.">
+          title="COOLDOWN group — the minimum gap between any two sends. Each row's minutes and seconds boxes ADD TOGETHER. The blue readout above shows exactly what the script understands.">
           <div class="kac-g-title">COOLDOWN — minimum gap between sends</div>
-          <div class="kac-grid">
-            <div class="kac-row">
-              <label title="Low end of the cooldown range — pairs with the Max beside it. (With Randomize off this is simply the fixed cooldown.)"><span id="kac-cool-lbl">Fixed (s)</span> <span class="kac-q">?</span></label>
-              <input type="number" id="kac-cool" min="0" step="1"
-                title="Minimum gap floor — two sends never land closer than this. With Randomize on this is the MINIMUM and pairs with the Max beside it. The script waits for whichever is longer (interval or cooldown). 'Send now' ignores it." />
-            </div>
-            <div class="kac-row" id="kac-cool-max-cell">
-              <label title="High end of the cooldown range — pairs with the Min beside it.">Max (s) <span class="kac-q">?</span></label>
-              <input type="number" id="kac-cool-max" min="0" step="1"
-                title="Upper bound of the cooldown range. Each cycle picks a random whole number of seconds between Min and this value." />
-            </div>
+          <div class="kac-g-read" id="kac-cool-read"></div>
+          <div class="kac-mmss">
+            <span class="kac-mmss-lbl" id="kac-cool-lbl">Gap</span>
+            <input type="number" id="kac-cool-m" min="0" step="1"
+              title="Minutes part of the cooldown. Adds to the seconds box beside it." />
+            <span class="kac-u">m</span>
+            <input type="number" id="kac-cool-s" min="0" max="59" step="1"
+              title="Seconds part of the cooldown. Adds to the minutes box beside it. Two sends never land closer than this. Over 59 rolls into minutes automatically." />
+            <span class="kac-u">s</span>
+          </div>
+          <div class="kac-mmss" id="kac-cool-max-cell">
+            <span class="kac-mmss-lbl">Max</span>
+            <input type="number" id="kac-cool-max-m" min="0" step="1"
+              title="Minutes part of the maximum cooldown. Adds to the seconds box beside it." />
+            <span class="kac-u">m</span>
+            <input type="number" id="kac-cool-max-s" min="0" max="59" step="1"
+              title="Seconds part of the maximum cooldown. Each cycle picks a random gap between the Min and Max rows." />
+            <span class="kac-u">s</span>
           </div>
         </div>
         <label class="kac-check"
@@ -738,13 +762,19 @@
       body: p.querySelector('#kac-body'),
       target: p.querySelector('#kac-target'),
       msg: p.querySelector('#kac-msg'),
-      int: p.querySelector('#kac-int'),
-      cool: p.querySelector('#kac-cool'),
       rand: p.querySelector('#kac-rand'),
       intMaxCell: p.querySelector('#kac-int-max-cell'),
       coolMaxCell: p.querySelector('#kac-cool-max-cell'),
-      intMax: p.querySelector('#kac-int-max'),
-      coolMax: p.querySelector('#kac-cool-max'),
+      intM: p.querySelector('#kac-int-m'),
+      intS: p.querySelector('#kac-int-s'),
+      intMaxM: p.querySelector('#kac-int-max-m'),
+      intMaxS: p.querySelector('#kac-int-max-s'),
+      coolM: p.querySelector('#kac-cool-m'),
+      coolS: p.querySelector('#kac-cool-s'),
+      coolMaxM: p.querySelector('#kac-cool-max-m'),
+      coolMaxS: p.querySelector('#kac-cool-max-s'),
+      intRead: p.querySelector('#kac-int-read'),
+      coolRead: p.querySelector('#kac-cool-read'),
       intLbl: p.querySelector('#kac-int-lbl'),
       coolLbl: p.querySelector('#kac-cool-lbl'),
       dup: p.querySelector('#kac-dup'),
@@ -796,28 +826,17 @@
       updateStatus();
     });
     ui.msg.addEventListener('input', () => { settings.message = ui.msg.value; saveSettings(); });
-    ui.int.addEventListener('input', () => {
-      settings.intervalSec = Math.max(1, parseInt(ui.int.value, 10) || 1); saveSettings();
-      if (settings.running) scheduleNext();
-    });
-    ui.cool.addEventListener('input', () => {
-      settings.cooldownSec = Math.max(0, parseInt(ui.cool.value, 10) || 0); saveSettings();
-      if (settings.running) scheduleNext();
-    });
+    bindMMSS(ui.intM, ui.intS, 'intervalSec', 1);
+    bindMMSS(ui.intMaxM, ui.intMaxS, 'intervalMaxSec', 1);
+    bindMMSS(ui.coolM, ui.coolS, 'cooldownSec', 0);
+    bindMMSS(ui.coolMaxM, ui.coolMaxS, 'cooldownMaxSec', 0);
     ui.rand.addEventListener('change', () => {
       settings.randomize = ui.rand.checked;
       ui.intMaxCell.classList.toggle('hidden', !settings.randomize);
       ui.coolMaxCell.classList.toggle('hidden', !settings.randomize);
       updateRandLabels();
+      updateTimingReadouts();
       saveSettings();
-      if (settings.running) scheduleNext();
-    });
-    ui.intMax.addEventListener('input', () => {
-      settings.intervalMaxSec = Math.max(1, parseInt(ui.intMax.value, 10) || 1); saveSettings();
-      if (settings.running) scheduleNext();
-    });
-    ui.coolMax.addEventListener('input', () => {
-      settings.cooldownMaxSec = Math.max(0, parseInt(ui.coolMax.value, 10) || 0); saveSettings();
       if (settings.running) scheduleNext();
     });
     ui.dup.addEventListener('change', () => {
@@ -974,14 +993,15 @@
   function applySettingsToUI() {
     ui.target.value = settings.targetChannel;
     ui.msg.value = settings.message;
-    ui.int.value = settings.intervalSec;
-    ui.cool.value = settings.cooldownSec;
+    writeMMSS(ui.intM, ui.intS, settings.intervalSec);
+    writeMMSS(ui.intMaxM, ui.intMaxS, settings.intervalMaxSec);
+    writeMMSS(ui.coolM, ui.coolS, settings.cooldownSec);
+    writeMMSS(ui.coolMaxM, ui.coolMaxS, settings.cooldownMaxSec);
     ui.rand.checked = settings.randomize;
-    ui.intMax.value = settings.intervalMaxSec;
-    ui.coolMax.value = settings.cooldownMaxSec;
     ui.intMaxCell.classList.toggle('hidden', !settings.randomize);
     ui.coolMaxCell.classList.toggle('hidden', !settings.randomize);
     updateRandLabels();
+    updateTimingReadouts();
     ui.dup.checked = settings.antiDup;
     ui.rotate.value = settings.rotateKeywords;
     ui.rotateRow.classList.toggle('hidden', !settings.antiDup);
@@ -1080,10 +1100,66 @@
   }
 
   // The coloured group titles carry the Interval/Cooldown names, so the inner
-  // labels only need to say whether the field is a range Min or a fixed value.
+  // labels only need to say whether the row is a range Min or a fixed value.
   function updateRandLabels() {
-    if (ui.intLbl) ui.intLbl.textContent = settings.randomize ? 'Min (s)' : 'Every (s)';
-    if (ui.coolLbl) ui.coolLbl.textContent = settings.randomize ? 'Min (s)' : 'Fixed (s)';
+    if (ui.intLbl) ui.intLbl.textContent = settings.randomize ? 'Min' : 'Every';
+    if (ui.coolLbl) ui.coolLbl.textContent = settings.randomize ? 'Min' : 'Gap';
+  }
+
+  // ---- minutes+seconds fields --------------------------------------------
+  // Settings still store TOTAL SECONDS; the m/s boxes are just a friendlier
+  // way to read and edit that number, so old saved settings/backups still work.
+  function fmtMS(total) {
+    const t = Math.max(0, Math.floor(total || 0));
+    const m = Math.floor(t / 60), s = t % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  function readMMSS(mEl, sEl) {
+    const m = Math.max(0, parseInt(mEl.value, 10) || 0);
+    const s = Math.max(0, parseInt(sEl.value, 10) || 0);
+    return m * 60 + s; // the two boxes simply add together
+  }
+
+  function writeMMSS(mEl, sEl, total) {
+    const t = Math.max(0, Math.floor(total || 0));
+    mEl.value = Math.floor(t / 60);
+    sEl.value = t % 60;
+  }
+
+  // Wire a minutes+seconds pair to a settings key holding total seconds.
+  function bindMMSS(mEl, sEl, key, minTotal) {
+    const apply = () => {
+      settings[key] = Math.max(minTotal, readMMSS(mEl, sEl));
+      saveSettings();
+      if (settings.running) scheduleNext();
+      updateTimingReadouts();
+    };
+    mEl.addEventListener('input', apply);
+    sEl.addEventListener('input', apply);
+    // On blur, re-render from the stored total so e.g. 90s becomes 1m 30s.
+    const normalise = () => writeMMSS(mEl, sEl, settings[key]);
+    mEl.addEventListener('change', normalise);
+    sEl.addEventListener('change', normalise);
+  }
+
+  // The "so we know the GUI understands it" readouts above each group.
+  function updateTimingReadouts() {
+    const lo = (a, b) => Math.min(a, b), hi = (a, b) => Math.max(a, b);
+    if (ui.intRead) {
+      const a = lo(settings.intervalSec, settings.intervalMaxSec);
+      const b = hi(settings.intervalSec, settings.intervalMaxSec);
+      ui.intRead.textContent = settings.randomize
+        ? `= sends every ${fmtMS(a)} – ${fmtMS(b)}  (${a}–${b}s)`
+        : `= sends every ${fmtMS(settings.intervalSec)}  (${settings.intervalSec}s)`;
+    }
+    if (ui.coolRead) {
+      const a = lo(settings.cooldownSec, settings.cooldownMaxSec);
+      const b = hi(settings.cooldownSec, settings.cooldownMaxSec);
+      ui.coolRead.textContent = settings.randomize
+        ? `= gap of ${fmtMS(a)} – ${fmtMS(b)}  (${a}–${b}s)`
+        : `= gap of ${fmtMS(settings.cooldownSec)}  (${settings.cooldownSec}s)`;
+    }
   }
 
   function syncControls() {
@@ -1456,11 +1532,11 @@
 
     // How often.
     const iv = settings.randomize
-      ? `every ${lo(settings.intervalSec, settings.intervalMaxSec)}–${hi(settings.intervalSec, settings.intervalMaxSec)}s (re-rolled each time)`
-      : `every ${settings.intervalSec}s`;
+      ? `every ${fmtMS(lo(settings.intervalSec, settings.intervalMaxSec))}–${fmtMS(hi(settings.intervalSec, settings.intervalMaxSec))} (re-rolled each time)`
+      : `every ${fmtMS(settings.intervalSec)}`;
     const cd = settings.randomize
-      ? `${lo(settings.cooldownSec, settings.cooldownMaxSec)}–${hi(settings.cooldownSec, settings.cooldownMaxSec)}s`
-      : `${settings.cooldownSec}s`;
+      ? `${fmtMS(lo(settings.cooldownSec, settings.cooldownMaxSec))}–${fmtMS(hi(settings.cooldownSec, settings.cooldownMaxSec))}`
+      : `${fmtMS(settings.cooldownSec)}`;
     lines.push(`Sends ${iv}, and never two sends closer than ${cd} apart.`);
 
     // What it sends.
