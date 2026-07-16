@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.27.0
+// @version      0.28.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -57,6 +57,8 @@
     webhookEnabled: false,  // POST each mention to a webhook
     webhookUrl: '',         // Discord webhook URL, or any endpoint that accepts JSON
     webhookFormat: 'discord', // 'discord' | 'json'
+    remoteEnabled: false,   // mirror state to / take commands from the local remote server
+    remotePort: 3300,       // must match the port server.js is listening on
     running: false,
     collapsed: false,
     explainOpen: true,         // "What will happen" summary expanded
@@ -110,6 +112,9 @@
   let unreadMen = 0;          // unseen mention count (for the badge)
   let menTotal = 0;           // how many mentions are in the list
   let mentionLog = [];        // persisted mention records (see MEN_KEY)
+  let logLines = [];          // in-memory copy of the activity log, mirrored to the remote
+  let remoteTimer = null;     // heartbeat to the local remote server
+  let remoteOk = null;        // last sync result: true | false | null (never tried)
 
   // ----------------------------------------------------------------------
   // Chat input / send logic
@@ -564,6 +569,8 @@
       .kac-inat input[type=text]{border:none;background:transparent;flex:1 1 auto;width:auto;padding-left:2px}
       #kac-sec-status{font-size:11px;color:#9a9aa3;min-height:14px;cursor:help}
       #kac-sec-status b{color:#53fc18}
+      #kac-rem-status{font-size:10px;color:#9a9aa3;min-height:13px;margin-top:5px;cursor:help;word-break:break-word}
+      #kac-rem-status b{color:#53fc18}
       .kac-grid{display:flex;gap:8px}
       .kac-grid .kac-row{flex:1}
       .kac-check{display:flex;align-items:center;gap:6px;color:#cfcfd6;cursor:pointer}
@@ -805,6 +812,18 @@
             </div>
           </div>
           <div class="kac-div"></div>
+          <div class="kac-set-h">REMOTE CONTROL</div>
+          <label class="kac-check"
+            title="Mirror this panel to a small server running on THIS PC, so you can start/stop it and read the log and mentions from your phone. Run 'node server.js' in the remote folder first. Purely optional — if the server isn't running, nothing happens and sending is unaffected.">
+            <input type="checkbox" id="kac-rem-en" /> Enable remote control</label>
+          <div class="kac-row" id="kac-rem-wrap">
+            <label title="Must match the port server.js is listening on (it prints the address to open on your phone when it starts). Default 3300.">Server port <span class="kac-q">?</span></label>
+            <input type="number" id="kac-rem-port" min="1" max="65535" step="1"
+              title="Port that server.js is listening on. Default 3300." />
+            <div id="kac-rem-status"
+              title="Whether this tab can reach the local remote server."></div>
+          </div>
+          <div class="kac-div"></div>
           <div class="kac-set-h">BACKUP</div>
           <div class="kac-btns">
             <button class="kac-btn kac-btn-sm" id="kac-export"
@@ -864,6 +883,10 @@
       whUrl: p.querySelector('#kac-wh-url'),
       whFmt: p.querySelector('#kac-wh-fmt'),
       whTest: p.querySelector('#kac-wh-test'),
+      remEn: p.querySelector('#kac-rem-en'),
+      remWrap: p.querySelector('#kac-rem-wrap'),
+      remPort: p.querySelector('#kac-rem-port'),
+      remStatus: p.querySelector('#kac-rem-status'),
       tabLog: p.querySelector('#kac-tab-log'),
       tabMen: p.querySelector('#kac-tab-men'),
       tabSet: p.querySelector('#kac-tab-set'),
@@ -975,6 +998,20 @@
     });
     ui.whUrl.addEventListener('input', () => { settings.webhookUrl = ui.whUrl.value; saveSettings(); });
     ui.whFmt.addEventListener('change', () => { settings.webhookFormat = ui.whFmt.value; saveSettings(); });
+    ui.remEn.addEventListener('change', () => {
+      settings.remoteEnabled = ui.remEn.checked;
+      ui.remWrap.classList.toggle('hidden', !settings.remoteEnabled);
+      remoteOk = null;
+      saveSettings();
+      applyRemote();
+      updateRemoteStatus();
+    });
+    ui.remPort.addEventListener('input', () => {
+      settings.remotePort = Math.max(1, Math.min(65535, parseInt(ui.remPort.value, 10) || 3300));
+      remoteOk = null;
+      saveSettings();
+      updateRemoteStatus();
+    });
     ui.whTest.addEventListener('click', () => {
       if (!(settings.webhookUrl || '').trim()) { log('Webhook: paste a URL first.', true); return; }
       setTab('log'); // the result lands in the log — show it
@@ -1105,6 +1142,10 @@
     ui.whUrl.value = settings.webhookUrl;
     ui.whFmt.value = settings.webhookFormat;
     ui.whWrap.classList.toggle('hidden', !settings.webhookEnabled);
+    ui.remEn.checked = settings.remoteEnabled;
+    ui.remPort.value = settings.remotePort;
+    ui.remWrap.classList.toggle('hidden', !settings.remoteEnabled);
+    updateRemoteStatus();
     syncWatchControls();
     updateMenBadge();
     updateExplain();
@@ -1334,6 +1375,9 @@
   }
 
   function log(msg, isErr) {
+    // Kept in memory too so the remote page can show the same log.
+    logLines.push({ t: new Date().toISOString(), m: String(msg), e: !!isErr });
+    while (logLines.length > 60) logLines.shift();
     if (!ui.log) return;
     const t = new Date().toLocaleTimeString();
     const line = document.createElement('div');
@@ -1760,6 +1804,111 @@
   }
 
   // ----------------------------------------------------------------------
+  // Remote control (opt-in) — mirror state to a small local server and take
+  // commands back from it, so a phone on the LAN can drive this tab.
+  //
+  // Everything here is wrapped and best-effort: if the server isn't running the
+  // sync silently no-ops. It must never be able to disturb sending.
+  // Note kick.com is HTTPS, so we can only reach 127.0.0.1 (browsers treat
+  // localhost as trustworthy); the phone reaches the same server over the LAN.
+  // ----------------------------------------------------------------------
+  function buildRemoteState() {
+    const secActive = settings.secondEnabled && (settings.secondMessage || '').trim();
+    return {
+      version: VERSION,
+      running: !!settings.running,
+      onTarget: isOnTarget(),
+      target: targetChannel(),
+      here: currentChannel(),
+      message: settings.message,
+      sendCount,
+      nextInSec: settings.running ? Math.max(0, Math.ceil((nextSendAt - Date.now()) / 1000)) : null,
+      secondMessage: secActive ? (settings.secondMessage || '').trim() : '',
+      secondInSec: (secActive && settings.running)
+        ? Math.max(0, Math.ceil((secondNextSendAt - Date.now()) / 1000)) : null,
+      watching: !!settings.watchEnabled,
+      watchName: watchName(),
+      menTotal,
+      unread: unreadMen,
+      log: logLines.slice(-40),
+      mentions: mentionLog.slice(-40),
+    };
+  }
+
+  function applyRemoteCommand(cmd) {
+    switch (cmd) {
+      case 'start':
+        if (!settings.running) { start(); log('Remote: start'); }
+        break;
+      case 'stop':
+        if (settings.running) { stop(); log('Remote: stop'); }
+        break;
+      case 'sendNow':
+        log('Remote: send now');
+        sendNow();
+        break;
+      case 'watchOn':
+        if (!settings.watchEnabled && watchName()) {
+          settings.watchEnabled = true;
+          saveSettings(); applyWatcher(); syncWatchControls();
+          log('Remote: watching on');
+        }
+        break;
+      case 'watchOff':
+        if (settings.watchEnabled) {
+          settings.watchEnabled = false;
+          saveSettings(); applyWatcher(); syncWatchControls();
+          log('Remote: watching off');
+        }
+        break;
+      case 'markRead': // phone opened the Mentions tab
+        unreadMen = 0;
+        updateMenBadge();
+        break;
+      default:
+        break;
+    }
+  }
+
+  async function remoteSync() {
+    if (!settings.remoteEnabled) return;
+    const port = Math.max(1, Math.min(65535, parseInt(settings.remotePort, 10) || 3300));
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: buildRemoteState() }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      if (remoteOk !== true) { remoteOk = true; updateRemoteStatus(); log(`Remote: connected on port ${port}.`); }
+      for (const cmd of d.commands || []) applyRemoteCommand(cmd);
+      updateStatus();
+    } catch (e) {
+      if (remoteOk !== false) { remoteOk = false; updateRemoteStatus(); }
+    }
+  }
+
+  function applyRemote() {
+    if (settings.remoteEnabled) {
+      if (!remoteTimer) { remoteTimer = setInterval(remoteSync, 2000); remoteSync(); }
+    } else if (remoteTimer) {
+      clearInterval(remoteTimer);
+      remoteTimer = null;
+      remoteOk = null;
+      updateRemoteStatus();
+    }
+  }
+
+  function updateRemoteStatus() {
+    if (!ui.remStatus) return;
+    if (!settings.remoteEnabled) { ui.remStatus.textContent = 'Off'; return; }
+    ui.remStatus.innerHTML = remoteOk
+      ? `Connected — open <b>http://&lt;this-pc-ip&gt;:${settings.remotePort}</b> on your phone`
+      : `Waiting for server on port ${settings.remotePort} — run: node server.js`;
+  }
+
+  // ----------------------------------------------------------------------
   // Backup / restore — export every setting to a JSON file and read it back.
   // ----------------------------------------------------------------------
   function exportSettings() {
@@ -1899,6 +2048,7 @@
     injectStyles();
     buildPanel();
     applyWatcher();
+    applyRemote();
     if (settings.running) {
       // Resume after navigation/reload if it was left running.
       scheduleNext();

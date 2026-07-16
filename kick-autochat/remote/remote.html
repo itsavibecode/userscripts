@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Kick Auto-Chat — Remote</title>
+<style>
+  :root{
+    --bg:#0a0a0d; --card:#0f0f12; --line:#2a2a30; --dim:#9a9aa3; --fg:#e7e7ea;
+    --green:#53fc18; --red:#ff4757; --blue:#9ad4ff; --amber:#ffc266;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.45 system-ui,-apple-system,Segoe UI,Arial,sans-serif;
+    padding:12px 12px calc(12px + env(safe-area-inset-bottom));}
+  header{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .dot{width:10px;height:10px;border-radius:50%;background:#666;flex:0 0 auto}
+  .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+  h1{font-size:15px;margin:0;flex:1;font-weight:700}
+  .ver{font-size:11px;color:var(--dim)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
+  .stat{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px}
+  .stat b{color:var(--fg);font-weight:600}
+  .stat span{color:var(--dim)}
+  .big{font-size:26px;font-weight:800;text-align:center;padding:6px 0}
+  .big.run{color:var(--green)} .big.idle{color:var(--dim)} .big.paused{color:var(--amber)}
+  button{width:100%;border:none;border-radius:10px;padding:16px;font:inherit;font-weight:800;
+    font-size:16px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  button:active{transform:scale(.985)}
+  button:disabled{opacity:.45}
+  .go{background:var(--green);color:#0a0a0a}
+  .halt{background:var(--red);color:#fff}
+  .sec{background:#2a2a30;color:var(--fg)}
+  .row{display:flex;gap:8px;margin-bottom:8px}
+  .row button{margin:0}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:8px}
+  .tab{flex:1;background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
+    padding:10px 6px;font-weight:700;font-size:13px;border-radius:0;width:auto}
+  .tab.active{color:var(--fg);border-bottom-color:var(--green)}
+  .badge{display:none;min-width:18px;padding:0 5px;border-radius:9px;background:var(--red);
+    color:#fff;font-size:11px;line-height:18px;margin-left:4px}
+  .list{background:#08080a;border:1px solid #16161b;border-radius:8px;padding:8px;
+    height:46vh;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-word}
+  .li{padding:3px 2px;border-bottom:1px solid #14141a}
+  .li:last-child{border-bottom:none}
+  .t{color:#6f6f78}
+  .s{color:var(--green);font-weight:700}
+  .li.reply{border-left:2px solid var(--blue);padding-left:5px}
+  .li.reply .s{color:var(--blue)}
+  .li.quote{border-left:2px solid var(--amber);padding-left:5px}
+  .li.quote .s{color:var(--amber)}
+  .q{color:#6f6f78;font-size:11px;padding-left:8px}
+  .err{color:#ff7b7b}
+  .note{color:var(--dim);font-size:12px;text-align:center;padding:16px 8px}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Kick Auto-Chat — Remote</h1>
+  <span class="ver" id="ver"></span>
+</header>
+
+<div class="card">
+  <div class="big idle" id="bigState">connecting…</div>
+  <div class="stat"><span>Target</span><b id="target">—</b></div>
+  <div class="stat"><span>Next send</span><b id="next">—</b></div>
+  <div class="stat"><span>Sent</span><b id="sent">—</b></div>
+  <div class="stat" id="secRow" hidden><span id="secLbl">Scheduled</span><b id="secNext">—</b></div>
+  <div class="stat"><span>Watching</span><b id="watch">—</b></div>
+</div>
+
+<div class="row">
+  <button class="go" id="toggle" disabled>Start</button>
+  <button class="sec" id="sendNow" disabled>Send now</button>
+</div>
+<div class="row">
+  <button class="sec" id="watchBtn" disabled>Start watching</button>
+</div>
+
+<div class="card">
+  <div class="tabs">
+    <button class="tab active" id="tabLog">Log</button>
+    <button class="tab" id="tabMen">Mentions <span class="badge" id="menBadge">0</span></button>
+  </div>
+  <div class="list" id="list"></div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  let tab = 'log';
+  let st = null;         // last state from the PC
+  let connected = false;
+  let busyUntil = 0;     // brief pause after a command so the UI doesn't flicker back
+
+  async function post(cmd) {
+    try {
+      await fetch('/cmd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd }),
+      });
+      // The PC pushes state every ~2s; ignore stale snapshots until it catches up.
+      busyUntil = Date.now() + 2500;
+    } catch (e) { /* server gone; the next poll will show disconnected */ }
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/state', { cache: 'no-store' });
+      const d = await r.json();
+      connected = !!d.connected;
+      st = d.state || null;
+    } catch (e) {
+      connected = false;
+    }
+    render();
+  }
+
+  function fmt(sec) {
+    if (sec === null || sec === undefined) return '—';
+    const s = Math.max(0, sec | 0);
+    if (s >= 3600) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    if (s >= 60) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    return s + 's';
+  }
+
+  function stamp(iso) {
+    try {
+      return new Date(iso).toLocaleString([], {
+        month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit',
+      });
+    } catch (e) { return ''; }
+  }
+
+  function render() {
+    $('dot').classList.toggle('on', connected && st && st.running);
+    $('ver').textContent = st && st.version ? 'v' + st.version : '';
+
+    const big = $('bigState');
+    if (!connected || !st) {
+      big.className = 'big idle';
+      big.textContent = 'PC not connected';
+      for (const id of ['toggle', 'sendNow', 'watchBtn']) $(id).disabled = true;
+      $('list').innerHTML = '<div class="note">Waiting for the Kick tab on your PC.<br>' +
+        'Make sure the kick.com tab is open and Remote control is enabled in the panel.</div>';
+      return;
+    }
+
+    for (const id of ['toggle', 'sendNow', 'watchBtn']) $(id).disabled = false;
+
+    if (st.running && !st.onTarget) {
+      big.className = 'big paused';
+      big.textContent = 'PAUSED — not on @' + (st.target || '?');
+    } else if (st.running) {
+      big.className = 'big run';
+      big.textContent = 'RUNNING';
+    } else {
+      big.className = 'big idle';
+      big.textContent = 'STOPPED';
+    }
+
+    $('target').textContent = st.target ? '@' + st.target : '(unset)';
+    $('next').textContent = st.running ? fmt(st.nextInSec) : '—';
+    $('sent').textContent = st.sendCount;
+    $('watch').textContent = st.watching && st.watchName ? '@' + st.watchName : 'off';
+
+    if (st.secondMessage) {
+      $('secRow').hidden = false;
+      $('secLbl').textContent = st.secondMessage;
+      $('secNext').textContent = st.running ? fmt(st.secondInSec) : '—';
+    } else {
+      $('secRow').hidden = true;
+    }
+
+    const t = $('toggle');
+    t.textContent = st.running ? 'Stop' : 'Start';
+    t.className = st.running ? 'halt' : 'go';
+
+    const w = $('watchBtn');
+    w.textContent = st.watching ? 'Stop watching' : 'Start watching';
+    w.className = st.watching ? 'halt' : 'sec';
+
+    const b = $('menBadge');
+    if (st.unread > 0) { b.textContent = st.unread > 99 ? '99+' : st.unread; b.style.display = 'inline-block'; }
+    else b.style.display = 'none';
+
+    renderList();
+  }
+
+  function renderList() {
+    const list = $('list');
+    list.textContent = '';
+    if (!st) return;
+
+    if (tab === 'log') {
+      for (const l of st.log || []) {
+        const d = document.createElement('div');
+        d.className = 'li' + (l.e ? ' err' : '');
+        const t = document.createElement('span');
+        t.className = 't';
+        t.textContent = '[' + stamp(l.t) + '] ';
+        d.appendChild(t);
+        d.appendChild(document.createTextNode(l.m));
+        list.appendChild(d);
+      }
+      if (!(st.log || []).length) list.innerHTML = '<div class="note">No activity yet.</div>';
+    } else {
+      for (const m of st.mentions || []) {
+        const d = document.createElement('div');
+        d.className = 'li ' + m.kind;
+        const t = document.createElement('span');
+        t.className = 't';
+        t.textContent = '[' + stamp(m.ts) + '] ';
+        d.appendChild(t);
+        const s = document.createElement('span');
+        s.className = 's';
+        const pre = m.kind === 'reply' ? '↩ ' : m.kind === 'quote' ? '❝ ' : '';
+        const re = m.kind === 'quote' && m.replyTo ? ' (re: @' + m.replyTo + ')' : '';
+        s.textContent = pre + (m.sender || '?') + re + ': ';
+        d.appendChild(s);
+        d.appendChild(document.createTextNode(m.body || '(no text)'));
+        if (m.kind === 'quote' && m.replyQuote) {
+          const q = document.createElement('div');
+          q.className = 'q';
+          q.textContent = '↳ ' + m.replyQuote.slice(0, 140);
+          d.appendChild(q);
+        }
+        list.appendChild(d);
+      }
+      if (!(st.mentions || []).length) list.innerHTML = '<div class="note">No mentions yet.</div>';
+    }
+    list.scrollTop = list.scrollHeight;
+  }
+
+  function setTab(t) {
+    tab = t;
+    $('tabLog').classList.toggle('active', t === 'log');
+    $('tabMen').classList.toggle('active', t === 'men');
+    if (t === 'men') post('markRead');
+    renderList();
+  }
+
+  $('toggle').onclick = () => { post(st && st.running ? 'stop' : 'start'); };
+  $('sendNow').onclick = () => post('sendNow');
+  $('watchBtn').onclick = () => post(st && st.watching ? 'watchOff' : 'watchOn');
+  $('tabLog').onclick = () => setTab('log');
+  $('tabMen').onclick = () => setTab('men');
+
+  poll();
+  setInterval(() => { if (Date.now() > busyUntil) poll(); }, 1500);
+})();
+</script>
+</body>
+</html>
