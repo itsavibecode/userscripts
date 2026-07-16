@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.12.0
+// @version      0.13.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -48,6 +48,9 @@
     // Kick bots — the points bot answering !claim would otherwise ping you
     // every time. Fully editable; add whatever you like.
     ignoreSenders: 'Botrix, StreamElements, Fossabot, Nightbot',
+    webhookEnabled: false,  // POST each mention to a webhook
+    webhookUrl: '',         // Discord webhook URL, or any endpoint that accepts JSON
+    webhookFormat: 'discord', // 'discord' | 'json'
     running: false,
     collapsed: false,
     logOpen: true,             // activity-log drawer open (side-by-side) vs hidden
@@ -656,6 +659,28 @@
         <label class="kac-check"
           title="Play a short beep when a new mention arrives.">
           <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
+        <label class="kac-check"
+          title="POST every detected mention to a webhook (Discord, or any endpoint that accepts JSON) with the sender, the message, the channel and a timestamp. Only mentions are sent — never your own chat messages.">
+          <input type="checkbox" id="kac-wh-en" /> Forward mentions to a webhook</label>
+        <div class="kac-row" id="kac-wh-wrap">
+          <label title="Paste your webhook URL. For Discord: Server Settings > Integrations > Webhooks > Copy Webhook URL. It is stored only in this browser.">Webhook URL <span class="kac-q">?</span></label>
+          <input type="text" id="kac-wh-url" placeholder="https://discord.com/api/webhooks/..."
+            title="Your webhook URL. Stored locally in this browser only. Treat it like a password — anyone with it can post to that channel." />
+          <div class="kac-grid" style="margin-top:6px">
+            <div class="kac-row">
+              <label title="Discord = a formatted message in the channel. Generic JSON = a raw JSON body with sender/message/channel/isReply/ts fields for your own endpoint.">Format <span class="kac-q">?</span></label>
+              <select id="kac-wh-fmt" title="Discord posts a readable message. Generic JSON posts raw fields for custom endpoints.">
+                <option value="discord">Discord</option>
+                <option value="json">Generic JSON</option>
+              </select>
+            </div>
+            <div class="kac-row">
+              <label title="Send a sample mention now to check the webhook works.">Check it <span class="kac-q">?</span></label>
+              <button class="kac-btn" id="kac-wh-test"
+                title="Posts a test mention to the webhook right now. Watch the Log tab for the result.">Test</button>
+            </div>
+          </div>
+        </div>
         <button class="kac-btn" id="kac-watch-btn"
           title="Start / stop watching chat for @mentions and replies to your username. INDEPENDENT of the main Start button — it works even when the auto-sender is stopped. Matches appear in the Mentions tab.">Start watching</button>
         <div id="kac-watch-status"
@@ -726,6 +751,11 @@
       watchUser: p.querySelector('#kac-watch-user'),
       watchIgnore: p.querySelector('#kac-watch-ignore'),
       watchSound: p.querySelector('#kac-watch-sound'),
+      whEn: p.querySelector('#kac-wh-en'),
+      whWrap: p.querySelector('#kac-wh-wrap'),
+      whUrl: p.querySelector('#kac-wh-url'),
+      whFmt: p.querySelector('#kac-wh-fmt'),
+      whTest: p.querySelector('#kac-wh-test'),
       tabLog: p.querySelector('#kac-tab-log'),
       tabMen: p.querySelector('#kac-tab-men'),
       clear: p.querySelector('#kac-clear'),
@@ -764,6 +794,10 @@
     ui.watchUser.value = settings.watchUsername;
     ui.watchIgnore.value = settings.ignoreSenders;
     ui.watchSound.checked = settings.watchSound;
+    ui.whEn.checked = settings.webhookEnabled;
+    ui.whUrl.value = settings.webhookUrl;
+    ui.whFmt.value = settings.webhookFormat;
+    ui.whWrap.classList.toggle('hidden', !settings.webhookEnabled);
     syncWatchControls();
     setTab('log');
     updateMenBadge();
@@ -862,6 +896,28 @@
       saveSettings(); // list is read live on each match, so nothing to restart
     });
     ui.watchSound.addEventListener('change', () => { settings.watchSound = ui.watchSound.checked; saveSettings(); });
+    ui.whEn.addEventListener('change', () => {
+      settings.webhookEnabled = ui.whEn.checked;
+      ui.whWrap.classList.toggle('hidden', !settings.webhookEnabled);
+      saveSettings();
+    });
+    ui.whUrl.addEventListener('input', () => { settings.webhookUrl = ui.whUrl.value; saveSettings(); });
+    ui.whFmt.addEventListener('change', () => { settings.webhookFormat = ui.whFmt.value; saveSettings(); });
+    ui.whTest.addEventListener('click', () => {
+      if (!(settings.webhookUrl || '').trim()) { log('Webhook: paste a URL first.', true); return; }
+      log('Webhook: sending test…');
+      const wasEnabled = settings.webhookEnabled;
+      settings.webhookEnabled = true; // let Test work even before enabling
+      postWebhook({
+        channel: currentChannel() || 'iceposeidon',
+        sender: 'test_user',
+        message: `test mention for @${watchName() || 'you'} from Kick Auto-Chat`,
+        isReply: false,
+        text: `test_user: test mention for @${watchName() || 'you'}`,
+        ts: new Date().toISOString(),
+      });
+      settings.webhookEnabled = wasEnabled;
+    });
     ui.tabLog.addEventListener('click', () => setTab('log'));
     ui.tabMen.addEventListener('click', () => setTab('men'));
     ui.clear.addEventListener('click', () => {
@@ -1199,7 +1255,40 @@
     return (s || '').replace(/\s+/g, ' ').trim();
   }
 
-  function addMention(text, isReply) {
+  // Split the rendered chat line into sender + message where we can, so the
+  // webhook payload has clean fields instead of one blob.
+  function splitMessage(text, sender) {
+    if (sender && text.toLowerCase().startsWith(sender.toLowerCase())) {
+      return text.slice(sender.length).replace(/^[:\s]+/, '');
+    }
+    return text;
+  }
+
+  function postWebhook(data) {
+    if (!settings.webhookEnabled) return;
+    const url = (settings.webhookUrl || '').trim();
+    if (!url) return;
+
+    let body;
+    if (settings.webhookFormat === 'discord') {
+      const who = data.sender || 'someone';
+      const verb = data.isReply ? 'replied to you' : 'mentioned you';
+      body = JSON.stringify({
+        username: 'Kick Auto-Chat',
+        content: `**${who}** ${verb} in kick.com/${data.channel}:\n> ${data.message}`,
+        // Never let a chat message trigger @everyone/@here pings in Discord.
+        allowed_mentions: { parse: [] },
+      });
+    } else {
+      body = JSON.stringify({ source: 'kick-autochat', ...data });
+    }
+
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+      .then((r) => { if (!r.ok) log(`Webhook failed: HTTP ${r.status}`, true); })
+      .catch((e) => log(`Webhook error: ${e.message} (blocked by CORS?)`, true));
+  }
+
+  function addMention(text, isReply, sender) {
     if (!ui.mentions) return;
     const t = new Date().toLocaleTimeString();
     const div = document.createElement('div');
@@ -1212,6 +1301,14 @@
     updateWatchStatus();
     if (activeTab !== 'men') { unreadMen++; updateMenBadge(); }
     if (settings.watchSound) beep();
+    postWebhook({
+      channel: currentChannel(),
+      sender: sender || '',
+      message: splitMessage(text, sender),
+      isReply: !!isReply,
+      text,
+      ts: new Date().toISOString(),
+    });
   }
 
   function handleChatNode(node) {
@@ -1229,7 +1326,7 @@
     const sender = extractSender(node);
     if (sender && sender.toLowerCase() === name.toLowerCase()) return; // your own message
     if (isIgnoredSender(sender)) return; // bots / muted senders
-    addMention(text, m.isReply);
+    addMention(text, m.isReply, sender);
   }
 
   function findChatList() {
@@ -1317,6 +1414,9 @@
       lines.push(ign.length
         ? `Ignoring ${ign.length} sender${ign.length === 1 ? '' : 's'}: ${ign.join(', ')}.`
         : `No ignored senders — bots that tag you will also show up.`);
+      if (settings.webhookEnabled && (settings.webhookUrl || '').trim()) {
+        lines.push(`Each mention is also POSTed to your ${settings.webhookFormat === 'discord' ? 'Discord' : 'JSON'} webhook (sender + message).`);
+      }
     } else {
       lines.push(`Mention watcher OFF — chat is not being read.`);
     }
