@@ -17,6 +17,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// Version of the remote (this server + remote.html). Tracked separately from the
+// userscript, which ships and updates on its own. Declared here and injected
+// into the page at serve time so there's one source of truth.
+const REMOTE_VERSION = '1.0.0';
+
 const PORT = Number(process.env.PORT || 3300);
 const HTML = path.join(__dirname, 'remote.html');
 
@@ -85,10 +90,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url === '/' || url === '/index.html') {
-    return fs.readFile(HTML, (err, buf) => {
+    return fs.readFile(HTML, 'utf8', (err, text) => {
       if (err) { res.writeHead(500); return res.end('remote.html is missing'); }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(buf);
+      res.end(text.replace(/\{\{REMOTE_VERSION\}\}/g, REMOTE_VERSION));
     });
   }
 
@@ -144,7 +149,7 @@ server.listen(PORT, '0.0.0.0', () => {
       if (n.family === 'IPv4' && !n.internal) ips.push(n.address);
     }
   }
-  console.log(`Kick Auto-Chat remote — listening on port ${PORT}`);
+  console.log(`Kick Auto-Chat remote v${REMOTE_VERSION} — listening on port ${PORT}`);
   console.log(`  userscript connects to : http://127.0.0.1:${PORT}`);
   if (ips.length) {
     for (const ip of ips) console.log(`  open on your phone     : http://${ip}:${PORT}`);
