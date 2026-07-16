@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.11.0
+// @version      0.12.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -504,6 +504,12 @@
       .kac-row input[type=text],.kac-row input[type=number],.kac-row select{background:#17171c;border:1px solid #2a2a30;
         color:#e7e7ea;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
       .kac-div{height:1px;background:#2a2a30;margin:3px 0 1px}
+      .kac-group{border-radius:8px;padding:7px;border:1px solid}
+      .kac-g-title{font-size:9.5px;font-weight:700;letter-spacing:.4px;margin-bottom:5px}
+      .kac-g-int{background:rgba(83,252,24,.06);border-color:rgba(83,252,24,.30)}
+      .kac-g-int .kac-g-title{color:#7ee85a}
+      .kac-g-cool{background:rgba(120,160,255,.07);border-color:rgba(120,160,255,.32)}
+      .kac-g-cool .kac-g-title{color:#93b4ff}
       .kac-inat{display:flex;align-items:center;gap:2px;background:#17171c;border:1px solid #2a2a30;border-radius:6px;padding-left:8px}
       .kac-inat span{color:#9a9aa3;font-weight:700;font-size:12px}
       .kac-inat input[type=text]{border:none;background:transparent;flex:1 1 auto;width:auto;padding-left:2px}
@@ -565,31 +571,39 @@
           <input type="text" id="kac-msg"
             title="The exact text sent to chat each time. Default is Cx. Changes save automatically and apply to the next send." />
         </div>
-        <div class="kac-grid">
-          <div class="kac-row">
-            <label title="Interval: your normal rhythm — how often the auto-loop sends, in seconds. With Randomize on, this is the LOW end of the range."><span id="kac-int-lbl">Interval (s)</span> <span class="kac-q">?</span></label>
-            <input type="number" id="kac-int" min="1" step="1"
-              title="INTERVAL = normal rhythm. Send roughly every N seconds (default 65). With Randomize on this is the minimum and 'Interval max' is the maximum. If lower than Cooldown, Cooldown wins." />
-          </div>
-          <div class="kac-row">
-            <label title="Cooldown: a minimum spacing floor. With Randomize on, this is the LOW end of the cooldown range."><span id="kac-cool-lbl">Cooldown (s)</span> <span class="kac-q">?</span></label>
-            <input type="number" id="kac-cool" min="0" step="1"
-              title="COOLDOWN = minimum gap floor. Two auto-sends never land closer than this. With Randomize on this is the minimum and 'Cooldown max' is the maximum. The script waits for whichever is longer (interval or cooldown). 'Send now' ignores it." />
+        <label class="kac-check"
+          title="When on: (1) each send waits a RANDOM whole number of seconds between the Min and Max of each coloured group below, re-rolled every cycle; and (2) rotation keywords are sent in RANDOM order, never the same one twice in a row. Makes the bot look less robotic.">
+          <input type="checkbox" id="kac-rand" /> Randomize timing &amp; keyword order</label>
+        <div class="kac-group kac-g-int"
+          title="INTERVAL group — the two fields in this green box work together: each send waits a random number of seconds between Min and Max.">
+          <div class="kac-g-title">INTERVAL — how often it sends</div>
+          <div class="kac-grid">
+            <div class="kac-row">
+              <label title="Low end of the interval range — pairs with the Max beside it. (With Randomize off this is simply the fixed interval.)"><span id="kac-int-lbl">Every (s)</span> <span class="kac-q">?</span></label>
+              <input type="number" id="kac-int" min="1" step="1"
+                title="How often it sends. With Randomize on this is the MINIMUM and pairs with the Max beside it. If lower than Cooldown, Cooldown wins." />
+            </div>
+            <div class="kac-row" id="kac-int-max-cell">
+              <label title="High end of the interval range — pairs with the Min beside it.">Max (s) <span class="kac-q">?</span></label>
+              <input type="number" id="kac-int-max" min="1" step="1"
+                title="Upper bound of the interval range. Each cycle picks a random whole number of seconds between Min and this value." />
+            </div>
           </div>
         </div>
-        <label class="kac-check"
-          title="When on: (1) each send waits a RANDOM whole number of seconds between the min (Interval/Cooldown) and the max values below, re-rolled every cycle; and (2) rotation keywords are sent in RANDOM order, never the same one twice in a row. Makes the bot look less robotic.">
-          <input type="checkbox" id="kac-rand" /> Randomize timing &amp; keyword order</label>
-        <div class="kac-grid" id="kac-rand-row">
-          <div class="kac-row">
-            <label title="Upper bound for the random interval, in seconds. Only used when Randomize is on.">Interval max (s) <span class="kac-q">?</span></label>
-            <input type="number" id="kac-int-max" min="1" step="1"
-              title="Max interval when Randomize is on. Each cycle picks a random whole number of seconds between Interval and this value." />
-          </div>
-          <div class="kac-row">
-            <label title="Upper bound for the random cooldown, in seconds. Only used when Randomize is on.">Cooldown max (s) <span class="kac-q">?</span></label>
-            <input type="number" id="kac-cool-max" min="0" step="1"
-              title="Max cooldown when Randomize is on. Each cycle picks a random whole number of seconds between Cooldown and this value." />
+        <div class="kac-group kac-g-cool"
+          title="COOLDOWN group — the two fields in this blue box work together: the minimum gap between any two sends is a random number of seconds between Min and Max.">
+          <div class="kac-g-title">COOLDOWN — minimum gap between sends</div>
+          <div class="kac-grid">
+            <div class="kac-row">
+              <label title="Low end of the cooldown range — pairs with the Max beside it. (With Randomize off this is simply the fixed cooldown.)"><span id="kac-cool-lbl">Fixed (s)</span> <span class="kac-q">?</span></label>
+              <input type="number" id="kac-cool" min="0" step="1"
+                title="Minimum gap floor — two sends never land closer than this. With Randomize on this is the MINIMUM and pairs with the Max beside it. The script waits for whichever is longer (interval or cooldown). 'Send now' ignores it." />
+            </div>
+            <div class="kac-row" id="kac-cool-max-cell">
+              <label title="High end of the cooldown range — pairs with the Min beside it.">Max (s) <span class="kac-q">?</span></label>
+              <input type="number" id="kac-cool-max" min="0" step="1"
+                title="Upper bound of the cooldown range. Each cycle picks a random whole number of seconds between Min and this value." />
+            </div>
           </div>
         </div>
         <label class="kac-check"
@@ -692,7 +706,8 @@
       int: p.querySelector('#kac-int'),
       cool: p.querySelector('#kac-cool'),
       rand: p.querySelector('#kac-rand'),
-      randRow: p.querySelector('#kac-rand-row'),
+      intMaxCell: p.querySelector('#kac-int-max-cell'),
+      coolMaxCell: p.querySelector('#kac-cool-max-cell'),
       intMax: p.querySelector('#kac-int-max'),
       coolMax: p.querySelector('#kac-cool-max'),
       intLbl: p.querySelector('#kac-int-lbl'),
@@ -736,7 +751,8 @@
     ui.rand.checked = settings.randomize;
     ui.intMax.value = settings.intervalMaxSec;
     ui.coolMax.value = settings.cooldownMaxSec;
-    ui.randRow.classList.toggle('hidden', !settings.randomize);
+    ui.intMaxCell.classList.toggle('hidden', !settings.randomize);
+    ui.coolMaxCell.classList.toggle('hidden', !settings.randomize);
     updateRandLabels();
     ui.dup.checked = settings.antiDup;
     ui.rotate.value = settings.rotateKeywords;
@@ -779,7 +795,8 @@
     });
     ui.rand.addEventListener('change', () => {
       settings.randomize = ui.rand.checked;
-      ui.randRow.classList.toggle('hidden', !settings.randomize);
+      ui.intMaxCell.classList.toggle('hidden', !settings.randomize);
+      ui.coolMaxCell.classList.toggle('hidden', !settings.randomize);
       updateRandLabels();
       saveSettings();
       if (settings.running) scheduleNext();
@@ -981,9 +998,11 @@
     });
   }
 
+  // The coloured group titles carry the Interval/Cooldown names, so the inner
+  // labels only need to say whether the field is a range Min or a fixed value.
   function updateRandLabels() {
-    if (ui.intLbl) ui.intLbl.textContent = settings.randomize ? 'Interval min (s)' : 'Interval (s)';
-    if (ui.coolLbl) ui.coolLbl.textContent = settings.randomize ? 'Cooldown min (s)' : 'Cooldown (s)';
+    if (ui.intLbl) ui.intLbl.textContent = settings.randomize ? 'Min (s)' : 'Every (s)';
+    if (ui.coolLbl) ui.coolLbl.textContent = settings.randomize ? 'Min (s)' : 'Fixed (s)';
   }
 
   function syncControls() {
