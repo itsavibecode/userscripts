@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.10.0
+// @version      0.10.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -473,6 +473,9 @@
       .kac-tab{flex:1;cursor:pointer;background:none;border:none;color:#9a9aa3;font:inherit;font-weight:700;
         padding:8px 6px;border-bottom:2px solid transparent;display:flex;align-items:center;justify-content:center;gap:5px}
       .kac-tab.active{color:#e7e7ea;border-bottom-color:#53fc18}
+      #kac-clear{flex:0 0 auto;cursor:pointer;background:none;border:none;border-left:1px solid #2a2a30;
+        color:#9a9aa3;font:inherit;font-size:10px;padding:0 8px}
+      #kac-clear:hover{color:#e7e7ea}
       .kac-badge{display:none;min-width:15px;padding:0 4px;border-radius:8px;background:#ff4757;color:#fff;
         font-size:9px;font-weight:700;text-align:center;line-height:15px}
       #kac-mentions{flex:1 1 auto;min-height:0;overflow:auto;padding:6px;font-size:10.5px;background:#0a0a0d}
@@ -654,6 +657,7 @@
         <div id="kac-drawer-head">
           <button id="kac-tab-log" class="kac-tab active" title="Activity log: sends, start/stop, and errors.">Log</button>
           <button id="kac-tab-men" class="kac-tab" title="Mentions: messages that @ you or reply to you (needs the watcher enabled below).">Mentions <span id="kac-men-badge" class="kac-badge">0</span></button>
+          <button id="kac-clear" title="Clear the list shown in the current tab (Log or Mentions).">Clear</button>
         </div>
         <div id="kac-log"
           title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Toggle it with the arrow in the title bar."></div>
@@ -699,6 +703,7 @@
       watchSound: p.querySelector('#kac-watch-sound'),
       tabLog: p.querySelector('#kac-tab-log'),
       tabMen: p.querySelector('#kac-tab-men'),
+      clear: p.querySelector('#kac-clear'),
       menBadge: p.querySelector('#kac-men-badge'),
       mentions: p.querySelector('#kac-mentions'),
       toggle: p.querySelector('#kac-toggle'),
@@ -827,6 +832,18 @@
     ui.watchSound.addEventListener('change', () => { settings.watchSound = ui.watchSound.checked; saveSettings(); });
     ui.tabLog.addEventListener('click', () => setTab('log'));
     ui.tabMen.addEventListener('click', () => setTab('men'));
+    ui.clear.addEventListener('click', () => {
+      if (activeTab === 'men') {
+        ui.mentions.textContent = '';
+        recentMentions.clear(); // so a repeat of the same text can log again
+        menTotal = 0;
+        unreadMen = 0;
+        updateMenBadge();
+        updateWatchStatus();
+      } else {
+        ui.log.textContent = '';
+      }
+    });
     ui.toggle.addEventListener('click', () => settings.running ? stop() : start());
     ui.now.addEventListener('click', sendNow);
     ui.logtab.addEventListener('click', () => {
