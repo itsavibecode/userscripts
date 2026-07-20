@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.28.2
+// @version      0.28.3
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -507,9 +507,14 @@
       #kac-clear:hover{color:#e7e7ea}
       .kac-badge{display:none;min-width:15px;padding:0 4px;border-radius:8px;background:#ff4757;color:#fff;
         font-size:9px;font-weight:700;text-align:center;line-height:15px}
-      #kac-mentions{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:6px;font-size:10.5px;background:#0a0a0d}
+      /* The scroll panes are absolutely positioned inside this filler, so their
+         content does NOT count toward the drawer's height. That makes the main
+         controls column the sole height determinant: the drawer matches it and
+         grows with it on resize, and each pane scrolls internally. */
+      #kac-drawer-body{position:relative;flex:1 1 0;min-height:0}
+      #kac-mentions{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:6px;font-size:10.5px;background:#0a0a0d}
       #kac-tab-set{flex:0 0 32px}
-      #kac-settings{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px;
+      #kac-settings{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:8px;
         display:flex;flex-direction:column;gap:8px;background:#0f0f12}
       .kac-set-h{font-size:9.5px;font-weight:700;letter-spacing:.4px;color:#9a9aa3}
       .kac-men-item{color:#e7e7ea;padding:3px 4px;border-bottom:1px solid #16161b;word-break:break-word}
@@ -600,8 +605,8 @@
       #kac-watch-btn.watching{background:#ff4757;color:#fff}
       #kac-watch-status{font-size:11px;color:#9a9aa3;min-height:14px}
       #kac-watch-status b{color:#53fc18}
-      #kac-log{font-size:10.5px;color:#7d7d85;background:#0a0a0d;
-        padding:6px;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+      #kac-log{position:absolute;inset:0;font-size:10.5px;color:#7d7d85;background:#0a0a0d;
+        padding:6px;overflow-y:auto;overflow-x:hidden;
         white-space:pre-wrap;word-break:break-word}
       #kac-log .err{color:#ff7b7b}
       #kac-explain{font-size:10px;line-height:1.45;border-radius:8px;padding:6px 7px;
@@ -774,6 +779,7 @@
           <button id="kac-tab-set" class="kac-tab" title="Settings: mention-watcher ignore list, sound, and webhook options.">⚙</button>
           <button id="kac-clear" title="Clear the list shown in the current tab (Log or Mentions).">Clear</button>
         </div>
+        <div id="kac-drawer-body">
         <div id="kac-log"
           title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Toggle it with the arrow in the title bar."></div>
         <div id="kac-mentions" style="display:none"
@@ -836,6 +842,7 @@
               title="Load a previously saved .json backup and apply it. Sending is left stopped afterwards so nothing fires unexpectedly — press Start when ready.">Restore</button>
           </div>
           <input type="file" id="kac-import-file" accept="application/json,.json" style="display:none" />
+        </div>
         </div>
       </div>
     `;
