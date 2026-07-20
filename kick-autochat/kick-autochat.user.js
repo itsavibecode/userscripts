@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.28.1
+// @version      0.28.2
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -486,13 +486,16 @@
 
   function injectStyles() {
     const css = `
+      /* Cap to the viewport so accumulating log/mention lines scroll INSIDE the
+         panel instead of stretching this fixed-position panel off the screen. */
       #kac-panel{position:fixed;z-index:2147483647;top:90px;right:16px;
         display:flex;flex-direction:row;align-items:stretch;gap:8px;
+        max-height:calc(100vh - 24px);
         color:#e7e7ea;font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;user-select:none}
-      #kac-main{position:relative;display:flex;flex-direction:column;width:248px;min-width:210px;
+      #kac-main{position:relative;display:flex;flex-direction:column;width:248px;min-width:210px;min-height:0;
         background:#0f0f12;border:1px solid #2a2a30;border-radius:10px;
         box-shadow:0 8px 28px rgba(0,0,0,.5);overflow:hidden}
-      #kac-drawer{display:flex;flex-direction:column;width:300px;min-width:170px;align-self:stretch;
+      #kac-drawer{display:flex;flex-direction:column;width:300px;min-width:170px;min-height:0;align-self:stretch;
         background:#0f0f12;border:1px solid #2a2a30;border-radius:10px;
         box-shadow:0 8px 28px rgba(0,0,0,.5);overflow:hidden}
       #kac-drawer-head{flex:0 0 auto;display:flex;gap:4px;background:#13131a;border-bottom:1px solid #2a2a30}
@@ -504,7 +507,7 @@
       #kac-clear:hover{color:#e7e7ea}
       .kac-badge{display:none;min-width:15px;padding:0 4px;border-radius:8px;background:#ff4757;color:#fff;
         font-size:9px;font-weight:700;text-align:center;line-height:15px}
-      #kac-mentions{flex:1 1 auto;min-height:0;overflow:auto;padding:6px;font-size:10.5px;background:#0a0a0d}
+      #kac-mentions{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:6px;font-size:10.5px;background:#0a0a0d}
       #kac-tab-set{flex:0 0 32px}
       #kac-settings{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px;
         display:flex;flex-direction:column;gap:8px;background:#0f0f12}
@@ -598,7 +601,8 @@
       #kac-watch-status{font-size:11px;color:#9a9aa3;min-height:14px}
       #kac-watch-status b{color:#53fc18}
       #kac-log{font-size:10.5px;color:#7d7d85;background:#0a0a0d;
-        padding:6px;flex:1 1 auto;min-height:0;overflow:auto;white-space:pre-wrap}
+        padding:6px;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+        white-space:pre-wrap;word-break:break-word}
       #kac-log .err{color:#ff7b7b}
       #kac-explain{font-size:10px;line-height:1.45;border-radius:8px;padding:6px 7px;
         background:rgba(255,184,77,.07);border:1px solid rgba(255,184,77,.30)}
