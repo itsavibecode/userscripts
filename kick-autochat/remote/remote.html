@@ -69,6 +69,7 @@
   .li{padding:3px 2px;border-bottom:1px solid #14141a}
   .li:last-child{border-bottom:none}
   .t{color:#6f6f78}
+  .c{color:#7a8;font-size:11px}
   .s{color:var(--green);font-weight:700}
   .li.reply{border-left:2px solid var(--blue);padding-left:5px}
   .li.reply .s{color:var(--blue)}
@@ -273,6 +274,13 @@
         t.className = 't';
         t.textContent = '[' + stamp(m.ts) + '] ';
         d.appendChild(t);
+        // Which channel this mention was captured on (multi-stream monitoring).
+        if (m.channel) {
+          const c = document.createElement('span');
+          c.className = 'c';
+          c.textContent = '[' + m.channel + '] ';
+          d.appendChild(c);
+        }
         const s = document.createElement('span');
         s.className = 's';
         const pre = m.kind === 'reply' ? '↩ ' : m.kind === 'quote' ? '❝ ' : '';

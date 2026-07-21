@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.28.3
+// @version      0.29.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -521,6 +521,7 @@
       .kac-men-item.reply{border-left:2px solid #9ad4ff;padding-left:4px}
       .kac-men-item.quote{border-left:2px solid #ffc266;padding-left:4px}
       .kac-men-t{color:#6f6f78}
+      .kac-men-c{color:#7a8;font-size:9.5px}
       .kac-men-s{color:#53fc18;font-weight:700}
       .kac-men-item.reply .kac-men-s{color:#9ad4ff}
       .kac-men-item.quote .kac-men-s{color:#ffc266}
@@ -1663,6 +1664,14 @@
     tEl.className = 'kac-men-t';
     tEl.textContent = `[${stampLocal(new Date(rec.ts))}] `;
     div.appendChild(tEl);
+    // Which channel this mention was captured on (multi-stream monitoring). Older
+    // records predating this field simply omit the tag.
+    if (rec.channel) {
+      const cEl = document.createElement('span');
+      cEl.className = 'kac-men-c';
+      cEl.textContent = `[${rec.channel}] `;
+      div.appendChild(cEl);
+    }
     const sEl = document.createElement('span');
     sEl.className = 'kac-men-s';
     sEl.textContent = `${prefix}${rec.sender || '?'}${reUser}: `;
@@ -1694,21 +1703,66 @@
     updateWatchStatus();
   }
 
+  // Stable identity of a mention record, used to collapse the same mention seen
+  // by two tabs watching the same channel. Prefer the id baked in at capture
+  // time; fall back to a composite for older records that lack one (treat a
+  // missing channel as '').
+  function mentionId(rec) {
+    if (rec && rec.id) return rec.id;
+    return (rec.channel || '') + '|' + (rec.ts || '') + '|' +
+      (rec.sender || '') + '|' + (rec.body || '').slice(0, 140);
+  }
+
+  // Read-merge-write the shared mentions store so two tabs capturing on the same
+  // (or different) channels never clobber each other. Union the freshly captured
+  // records with whatever is currently persisted — keyed by id, first-seen wins —
+  // sort ascending by ts, cap to MEN_MAX, persist, and adopt the merged array as
+  // our in-memory list.
+  function mergeMentions(newRecs) {
+    const byId = new Map();
+    const add = (rec) => {
+      const key = mentionId(rec);
+      if (!byId.has(key)) byId.set(key, rec); // first-seen wins
+    };
+    for (const r of loadMentions()) add(r);       // whatever another tab wrote
+    for (const r of (newRecs || [])) add(r);      // our just-captured additions
+    let merged = [...byId.values()];
+    merged.sort((a, b) => (Date.parse(a.ts) || 0) - (Date.parse(b.ts) || 0));
+    if (merged.length > MEN_MAX) merged = merged.slice(-MEN_MAX);
+    try {
+      localStorage.setItem(MEN_KEY, JSON.stringify(merged));
+    } catch (e) { /* ignore quota errors */ }
+    mentionLog = merged;
+    return merged;
+  }
+
   function addMention(m) {
     if (!ui.mentions) return;
     const now = new Date();
+    const channel = currentChannel();
+    const bodySlice = (m.body || '').slice(0, 140);
+    const ts = now.toISOString();
+    // Prefer Kick's own DOM timestamp for the id so the same line seen by two
+    // tabs on this channel collapses; fall back to our capture time when the
+    // line carries no timestamp (that fallback won't dedupe across tabs, but a
+    // duplicate is far better than losing the mention).
+    const sig = (m.domTs || ts) + '|' + (m.sender || '') + '|' + bodySlice;
     const rec = {
-      ts: now.toISOString(),
+      id: channel + '|' + sig,
+      ts,
+      channel,
       kind: m.kind,
       sender: m.sender || '',
       body: m.body || '',
       replyTo: m.rep ? m.rep.user : '',
       replyQuote: m.rep ? m.rep.quote : '',
     };
-    mentionLog.push(rec);
-    while (mentionLog.length > MEN_MAX) mentionLog.shift();
-    saveMentions();
-    renderMention(rec);
+
+    // Merge into the shared store, then repaint from the merged result so the
+    // panel reflects anything a sibling tab added since our last write.
+    mergeMentions([rec]);
+    ui.mentions.textContent = '';
+    for (const r of mentionLog) renderMention(r);
 
     menTotal = mentionLog.length;
     updateWatchStatus();
@@ -1736,7 +1790,13 @@
     const c = classifyLine(target, name);
     if (!c.hit) return;
 
-    addMention({ kind: c.kind, sender, body: c.body, rep: c.rep });
+    // Kick's own timestamp for this line (present in the DOM even when hidden by
+    // CSS) gives a stable, tab-independent component for the mention id so the
+    // same line captured by two tabs on this channel collapses to one.
+    const tEl = target.querySelector('span[style*="chatroom-timestamps-display"]');
+    const domTs = tEl ? (tEl.textContent || '').trim() : '';
+
+    addMention({ kind: c.kind, sender, body: c.body, rep: c.rep, domTs });
   }
 
   // Kick renders chat as a VIRTUALISED list of div[data-index="N"] wrappers, but
@@ -2061,9 +2121,30 @@
   // ----------------------------------------------------------------------
   // Boot — wait until the page body exists, then mount.
   // ----------------------------------------------------------------------
+  // Cross-tab live sync: when another tab captures a mention it writes the shared
+  // store, which fires a 'storage' event HERE (storage events never fire in the
+  // tab that made the change). Reload our list from disk and repaint so every tab
+  // shows the union. We bump the unread badge for genuinely new records, but do
+  // NOT beep — the beep belongs to the tab that actually captured the mention.
+  function onMentionsStorage(e) {
+    if (e.key !== MEN_KEY) return;
+    if (!ui || !ui.mentions) return;
+    const prevIds = new Set(mentionLog.map(mentionId));
+    mentionLog = loadMentions();
+    ui.mentions.textContent = '';
+    for (const r of mentionLog) renderMention(r);
+    menTotal = mentionLog.length;
+    let gained = 0;
+    for (const r of mentionLog) if (!prevIds.has(mentionId(r))) gained++;
+    if (gained > 0 && activeTab !== 'men') unreadMen += gained;
+    updateMenBadge();
+    updateWatchStatus();
+  }
+
   function boot() {
     injectStyles();
     buildPanel();
+    window.addEventListener('storage', onMentionsStorage);
     applyWatcher();
     applyRemote();
     if (settings.running) {
