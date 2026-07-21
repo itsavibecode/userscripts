@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.29.0
+// @version      0.30.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -50,6 +50,7 @@
     watchUsername: '',      // your own Kick username (exact)
     watchSound: true,       // beep on a new mention
     watchBareName: false,   // also match your username with no @ in front
+    watchScope: 'all',      // 'all' = watch every open Kick tab; 'target' = only when on the target channel
     // Senders the watcher skips (comma-separated). Pre-filled with the usual
     // Kick bots — the points bot answering !claim would otherwise ping you
     // every time. Fully editable; add whatever you like.
@@ -792,6 +793,14 @@
             <input type="text" id="kac-watch-ignore" placeholder="e.g. Botrix, StreamElements"
               title="Comma-separated usernames to ignore. Messages from these senders are never logged as mentions. The @ is optional; matching is case-insensitive. Leave empty to catch everyone." />
           </div>
+          <div class="kac-row">
+            <label title="Which Kick tabs the mention watcher reads. All open channels: every open Kick tab is monitored, no matter which streamer it shows. Only the target channel: a tab only monitors while it's on kick.com/<target> — the same Target channel used for sending — and sits idle on any other channel.">Watch scope <span class="kac-q">?</span></label>
+            <select id="kac-watch-scope"
+              title="All open channels = every open Kick tab is monitored. Only the target channel = a tab only monitors while it's showing kick.com/<target> (the same target the sender uses), idle otherwise.">
+              <option value="all">All open channels</option>
+              <option value="target">Only the target channel</option>
+            </select>
+          </div>
           <label class="kac-check"
             title="Play a short beep when a new mention arrives.">
             <input type="checkbox" id="kac-watch-sound" /> Sound on mention</label>
@@ -890,6 +899,7 @@
       watchIgnore: p.querySelector('#kac-watch-ignore'),
       watchSound: p.querySelector('#kac-watch-sound'),
       watchBare: p.querySelector('#kac-watch-bare'),
+      watchScope: p.querySelector('#kac-watch-scope'),
       whEn: p.querySelector('#kac-wh-en'),
       whWrap: p.querySelector('#kac-wh-wrap'),
       whUrl: p.querySelector('#kac-wh-url'),
@@ -1002,6 +1012,14 @@
     ui.watchBare.addEventListener('change', () => {
       settings.watchBareName = ui.watchBare.checked;
       saveSettings(); // matching reads this live — nothing to restart
+    });
+    ui.watchScope.addEventListener('change', () => {
+      settings.watchScope = ui.watchScope.value;
+      saveSettings();
+      // scanChat reads scope live each tick, so no restart is strictly needed,
+      // but refresh the watcher and status so the change is reflected at once.
+      applyWatcher();
+      updateWatchStatus();
     });
     ui.whEn.addEventListener('change', () => {
       settings.webhookEnabled = ui.whEn.checked;
@@ -1150,6 +1168,7 @@
     ui.watchIgnore.value = settings.ignoreSenders;
     ui.watchSound.checked = settings.watchSound;
     ui.watchBare.checked = settings.watchBareName;
+    ui.watchScope.value = settings.watchScope;
     ui.whEn.checked = settings.webhookEnabled;
     ui.whUrl.value = settings.webhookUrl;
     ui.whFmt.value = settings.webhookFormat;
@@ -1440,7 +1459,18 @@
     const name = watchName();
     if (!settings.watchEnabled) { ui.watchStatus.textContent = 'Not watching'; return; }
     if (!name) { ui.watchStatus.textContent = 'Enter your username to start'; return; }
-    ui.watchStatus.innerHTML = `Watching <b>@${name}</b> · ${menTotal} mention${menTotal === 1 ? '' : 's'}`;
+    const count = `${menTotal} mention${menTotal === 1 ? '' : 's'}`;
+    if (settings.watchScope === 'target') {
+      // Target-only scope: note it, and flag when this tab is idle because it's
+      // not currently on the target channel.
+      if (isOnTarget()) {
+        ui.watchStatus.innerHTML = `Watching <b>@${name}</b> (target only) · ${count}`;
+      } else {
+        ui.watchStatus.innerHTML = `Watching <b>@${name}</b> (target only) — idle here (@${currentChannel() || '—'}) · ${count}`;
+      }
+      return;
+    }
+    ui.watchStatus.innerHTML = `Watching <b>@${name}</b> · ${count}`;
   }
 
   function syncWatchControls() {
@@ -1832,6 +1862,11 @@
     if (!settings.watchEnabled) return;
     const name = watchName();
     if (!name) return;
+    // Watch scope: when set to 'target', a tab only monitors while it's actually
+    // showing the target channel. Returning here BEFORE the seeding block means an
+    // off-target tab never seeds — so navigating it onto the target starts a clean
+    // watch (seeds once), and navigating away stops it. Read live every tick.
+    if (settings.watchScope === 'target' && !isOnTarget()) return;
     const lines = chatLines();
     if (!lines.length) return;
 
@@ -2081,7 +2116,10 @@
     // Mention watcher.
     const wn = watchName();
     if (settings.watchEnabled && wn) {
-      lines.push(`Watching chat for ${settings.watchBareName ? `@${wn} OR bare "${wn}"` : `@${wn}`} — mentions/replies go to the Mentions tab${settings.watchSound ? ' with a beep' : ' (no sound)'}.`);
+      const scopeTxt = settings.watchScope === 'target'
+        ? `only on the target channel (${targetChannel() ? `@${targetChannel()}` : 'none set'})`
+        : `across all open channels`;
+      lines.push(`Watching ${scopeTxt} for ${settings.watchBareName ? `@${wn} OR bare "${wn}"` : `@${wn}`} — mentions/replies go to the Mentions tab${settings.watchSound ? ' with a beep' : ' (no sound)'}.`);
       const ign = ignoredSenders();
       lines.push(ign.length
         ? `Ignoring ${ign.length} sender${ign.length === 1 ? '' : 's'}: ${ign.join(', ')}.`
