@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.32.0
+// @version      0.33.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -27,6 +27,15 @@
   // Mentions are kept in their own store so they survive a reload.
   const MEN_KEY = 'kick-autochat:mentions';
   const MEN_MAX = 60;
+
+  // Multi-tab remote coordination. The remote server has a single state slot, so
+  // if every open Kick tab posted to it they would overwrite each other and the
+  // phone would flip-flop between tabs. Instead we elect ONE leader tab (ideally
+  // the one on the target channel) via a shared localStorage record; only the
+  // leader talks to the server. See claimRemoteLeadership().
+  const TAB_ID = Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+  const REMOTE_LEADER_KEY = 'kick-autochat:remote-leader';
+  const REMOTE_LEADER_STALE_MS = 3000; // a leader record older than this is up for grabs
 
   // ----------------------------------------------------------------------
   // Persistent settings (localStorage, per-origin)
@@ -116,6 +125,8 @@
   let logLines = [];          // in-memory copy of the activity log, mirrored to the remote
   let remoteTimer = null;     // heartbeat to the local remote server
   let remoteOk = null;        // last sync result: true | false | null (never tried)
+  let remoteLeader = true;    // is THIS tab the elected remote leader? (single tab ⇒ always true)
+  let remoteLeaderChannel = null; // channel slug of the current leader when we're a standby
 
   // ----------------------------------------------------------------------
   // Chat input / send logic
@@ -2110,8 +2121,61 @@
     }
   }
 
+  // Elect the single tab that owns the remote. Returns true if THIS tab is the
+  // leader after the call. Coordination is a shared localStorage record; the
+  // on-target (sending) tab is preferred, and a stale record (dead/closed tab)
+  // is always reclaimable. Returns false for standby tabs and stashes the
+  // current leader's channel in remoteLeaderChannel for the status line.
+  function claimRemoteLeadership() {
+    let rec = null;
+    try {
+      const raw = localStorage.getItem(REMOTE_LEADER_KEY);
+      if (raw) rec = JSON.parse(raw);
+    } catch (e) { rec = null; } // corrupt/absent record ⇒ treat as no leader
+
+    const now = Date.now();
+    const stale = !rec || (now - rec.ts) > REMOTE_LEADER_STALE_MS;
+    const iAmOnTarget = isOnTarget();
+
+    // Decide whether I own the remote after this call.
+    let iLead;
+    if (stale) {
+      iLead = true;                       // nobody holds a live claim — take it
+    } else if (rec.id === TAB_ID) {
+      iLead = true;                       // already the leader — keep it
+    } else if (iAmOnTarget && !rec.onTarget) {
+      iLead = true;                       // I'm the sending tab; strictly better — take over
+    } else {
+      iLead = false;                      // a fresh, equally-or-better leader exists — stand by
+    }
+
+    remoteLeader = iLead;
+    if (iLead) {
+      remoteLeaderChannel = null;
+      try {
+        localStorage.setItem(REMOTE_LEADER_KEY, JSON.stringify({
+          id: TAB_ID,
+          channel: currentChannel(),
+          onTarget: iAmOnTarget,
+          running: !!settings.running,
+          ts: now,
+        }));
+      } catch (e) { /* storage full/blocked — still act as leader this tick */ }
+    } else {
+      remoteLeaderChannel = (rec && rec.channel) || null;
+    }
+    return iLead;
+  }
+
   async function remoteSync() {
     if (!settings.remoteEnabled) return;
+    // Only the elected leader tab talks to the single-slot server; standby tabs
+    // skip the round trip entirely so they can't overwrite the leader's state.
+    if (!claimRemoteLeadership()) {
+      if (remoteOk !== null) remoteOk = null;
+      updateRemoteStatus();
+      return;
+    }
     const port = Math.max(1, Math.min(65535, parseInt(settings.remotePort, 10) || 3300));
     try {
       const r = await fetch(`http://127.0.0.1:${port}/sync`, {
@@ -2146,9 +2210,28 @@
     }
   }
 
+  // If this tab is the leader when it closes, expire the record immediately so a
+  // surviving tab can take over on its next tick instead of waiting ~3s for the
+  // claim to go stale. Best-effort: unload handlers can't be relied on fully.
+  window.addEventListener('beforeunload', () => {
+    try {
+      const raw = localStorage.getItem(REMOTE_LEADER_KEY);
+      if (!raw) return;
+      const rec = JSON.parse(raw);
+      if (rec && rec.id === TAB_ID) localStorage.removeItem(REMOTE_LEADER_KEY);
+    } catch (e) { /* nothing we can do on the way out */ }
+  });
+
   function updateRemoteStatus() {
     if (!ui.remStatus) return;
     if (!settings.remoteEnabled) { ui.remStatus.textContent = 'Off'; return; }
+    if (!remoteLeader) {
+      // Another tab owns the remote; we're deliberately silent so we don't
+      // overwrite its state on the phone.
+      const who = remoteLeaderChannel ? `@${remoteLeaderChannel}` : 'another';
+      ui.remStatus.innerHTML = `Standby — ${who} tab is the active remote`;
+      return;
+    }
     ui.remStatus.innerHTML = remoteOk
       ? `Connected — open <b>http://&lt;this-pc-ip&gt;:${settings.remotePort}</b> on your phone`
       : `Waiting for server on port ${settings.remotePort} — run: node server.js`;
