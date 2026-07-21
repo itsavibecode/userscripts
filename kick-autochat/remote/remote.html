@@ -79,6 +79,23 @@
   .err{color:#ff7b7b}
   .note{color:var(--dim);font-size:12px;text-align:center;padding:16px 8px}
   .foot{color:#5a5a63;font-size:11px;text-align:center;padding:2px 0 6px}
+  /* Settings tab — a scrollable form styled to match the dark cards above. */
+  #settingsView{max-height:62vh;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
+  .setGrp{margin-bottom:14px}
+  .setH{font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--dim);text-transform:uppercase;
+    margin:2px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+  .fld{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
+  .fld > span{font-size:12px;color:var(--dim);display:flex;justify-content:space-between;gap:8px}
+  .fld > span i{color:var(--green);font-style:normal;font-size:11px;white-space:nowrap}
+  .fld input[type=text],.fld input[type=number],.fld select{width:100%;max-width:100%;background:#08080a;
+    border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:12px;font:inherit;font-size:16px;
+    -webkit-appearance:none;appearance:none;box-sizing:border-box}
+  .fld input:focus,.fld select:focus{outline:none;border-color:var(--green)}
+  .fldRow{display:flex;gap:8px}
+  .fldRow .fld{flex:1 1 0;min-width:0}
+  .chk{display:flex;align-items:center;gap:10px;padding:9px 2px;font-size:14px;cursor:pointer}
+  .chk input[type=checkbox]{width:22px;height:22px;flex:0 0 auto;accent-color:var(--green);margin:0}
+  .chk span{flex:1;min-width:0;word-break:break-word}
 </style>
 </head>
 <body>
@@ -109,8 +126,72 @@
   <div class="tabs">
     <button class="tab active" id="tabLog">Log</button>
     <button class="tab" id="tabMen">Mentions <span class="badge" id="menBadge">0</span></button>
+    <button class="tab" id="tabSet" aria-label="Settings">⚙</button>
   </div>
   <div class="list" id="list"></div>
+  <div id="settingsView" style="display:none">
+    <div class="setGrp">
+      <div class="setH">Sending</div>
+      <label class="fld"><span>Target channel</span>
+        <input type="text" id="set_targetChannel" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="iceposeidon" /></label>
+      <label class="fld"><span>Message</span>
+        <input type="text" id="set_message" /></label>
+      <label class="fld"><span>Interval min <i id="hint_intervalSec"></i></span>
+        <input type="number" id="set_intervalSec" min="1" inputmode="numeric" /></label>
+      <label class="fld"><span>Interval max <i id="hint_intervalMaxSec"></i></span>
+        <input type="number" id="set_intervalMaxSec" min="1" inputmode="numeric" /></label>
+      <label class="fld"><span>Cooldown min <i id="hint_cooldownSec"></i></span>
+        <input type="number" id="set_cooldownSec" min="0" inputmode="numeric" /></label>
+      <label class="fld"><span>Cooldown max <i id="hint_cooldownMaxSec"></i></span>
+        <input type="number" id="set_cooldownMaxSec" min="0" inputmode="numeric" /></label>
+      <label class="chk"><input type="checkbox" id="set_randomize" /> <span>Randomize timing &amp; order</span></label>
+      <label class="chk"><input type="checkbox" id="set_antiDup" /> <span>Anti-duplicate</span></label>
+      <label class="fld"><span>Rotation keywords (comma-separated)</span>
+        <input type="text" id="set_rotateKeywords" placeholder="e.g. KEKW, LULW" /></label>
+    </div>
+    <div class="setGrp">
+      <div class="setH">Scheduled</div>
+      <label class="chk"><input type="checkbox" id="set_secondEnabled" /> <span>Scheduled message</span></label>
+      <label class="fld"><span>Message / command</span>
+        <input type="text" id="set_secondMessage" placeholder="!claim" /></label>
+      <div class="fldRow">
+        <label class="fld"><span>Every</span>
+          <input type="number" id="set_secondValue" min="1" inputmode="numeric" /></label>
+        <label class="fld"><span>Unit</span>
+          <select id="set_secondUnit">
+            <option value="minutes">minutes</option>
+            <option value="hours">hours</option>
+          </select></label>
+      </div>
+    </div>
+    <div class="setGrp">
+      <div class="setH">Watcher</div>
+      <label class="chk"><input type="checkbox" id="set_watchEnabled" /> <span>Mention watcher</span></label>
+      <label class="fld"><span>Your username</span>
+        <input type="text" id="set_watchUsername" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="your_kick_name" /></label>
+      <label class="fld"><span>Watch scope</span>
+        <select id="set_watchScope">
+          <option value="all">All open channels</option>
+          <option value="target">Only the target channel</option>
+        </select></label>
+      <label class="chk"><input type="checkbox" id="set_watchSound" /> <span>Sound on mention</span></label>
+      <label class="chk"><input type="checkbox" id="set_watchBareName" /> <span>Also match my name without @</span></label>
+      <label class="fld"><span>Ignore senders (comma-separated)</span>
+        <input type="text" id="set_ignoreSenders" placeholder="e.g. Botrix, StreamElements" /></label>
+    </div>
+    <div class="setGrp">
+      <div class="setH">Webhook</div>
+      <label class="chk"><input type="checkbox" id="set_webhookEnabled" /> <span>Forward mentions to a webhook</span></label>
+      <label class="fld"><span>Webhook URL</span>
+        <input type="text" id="set_webhookUrl" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://discord.com/api/webhooks/..." /></label>
+      <label class="fld"><span>Format</span>
+        <select id="set_webhookFormat">
+          <option value="discord">Discord</option>
+          <option value="json">Generic JSON</option>
+        </select></label>
+    </div>
+    <div class="note">Changes apply to the PC instantly and appear in the Log tab.</div>
+  </div>
 </div>
 
 <div class="foot" id="foot"></div>
@@ -246,6 +327,7 @@
     if (st.unread > 0) { b.textContent = st.unread > 99 ? '99+' : st.unread; b.style.display = 'inline-block'; }
     else b.style.display = 'none';
 
+    fillSettings();
     renderList();
   }
 
@@ -305,8 +387,99 @@
     tab = t;
     $('tabLog').classList.toggle('active', t === 'log');
     $('tabMen').classList.toggle('active', t === 'men');
+    $('tabSet').classList.toggle('active', t === 'set');
+    const showSet = t === 'set';
+    $('settingsView').style.display = showSet ? 'block' : 'none';
+    $('list').style.display = showSet ? 'none' : 'block';
     if (t === 'men') post('markRead');
+    if (showSet) fillSettings();
     renderList();
+  }
+
+  // ---- Settings form ------------------------------------------------------
+  // One descriptor per editable key; the id in the HTML is 'set_' + key, and
+  // timing fields also have a live 'hint_' + key readout ("= 1m 50s").
+  const SETTINGS_FIELDS = [
+    { key: 'targetChannel', type: 'text' },
+    { key: 'message', type: 'text' },
+    { key: 'intervalSec', type: 'int', hint: true },
+    { key: 'intervalMaxSec', type: 'int', hint: true },
+    { key: 'cooldownSec', type: 'int', hint: true },
+    { key: 'cooldownMaxSec', type: 'int', hint: true },
+    { key: 'randomize', type: 'bool' },
+    { key: 'antiDup', type: 'bool' },
+    { key: 'rotateKeywords', type: 'text' },
+    { key: 'secondEnabled', type: 'bool' },
+    { key: 'secondMessage', type: 'text' },
+    { key: 'secondValue', type: 'int' },
+    { key: 'secondUnit', type: 'select' },
+    { key: 'watchEnabled', type: 'bool' },
+    { key: 'watchUsername', type: 'text' },
+    { key: 'watchScope', type: 'select' },
+    { key: 'watchSound', type: 'bool' },
+    { key: 'watchBareName', type: 'bool' },
+    { key: 'ignoreSenders', type: 'text' },
+    { key: 'webhookEnabled', type: 'bool' },
+    { key: 'webhookUrl', type: 'text' },
+    { key: 'webhookFormat', type: 'select' },
+  ];
+
+  const sendTimers = {};
+
+  function updateHint(key) {
+    const el = $('set_' + key), h = $('hint_' + key);
+    if (!el || !h) return;
+    const v = parseInt(el.value, 10);
+    h.textContent = Number.isFinite(v) ? '= ' + fmt(v) : '';
+  }
+
+  // Ship one field's current value to the PC as {set:{key:value}}, then poll so
+  // the confirmation (new state + the "Remote: …" log line) comes back fast.
+  function sendSet(f) {
+    const el = $('set_' + f.key);
+    if (!el) return;
+    let val;
+    if (f.type === 'bool') val = el.checked;
+    else if (f.type === 'int') { val = parseInt(el.value, 10); if (!Number.isFinite(val)) return; }
+    else val = el.value;
+    post({ set: { [f.key]: val } });
+    poll();
+  }
+
+  function debounceSend(f) {
+    clearTimeout(sendTimers[f.key]);
+    sendTimers[f.key] = setTimeout(() => sendSet(f), 500);
+  }
+
+  function wireSettings() {
+    for (const f of SETTINGS_FIELDS) {
+      const el = $('set_' + f.key);
+      if (!el) continue;
+      if (f.type === 'bool' || f.type === 'select') {
+        el.addEventListener('change', () => sendSet(f));
+      } else {
+        // Text/number: debounce so we don't POST on every keystroke; update the
+        // live hint immediately for a responsive feel.
+        el.addEventListener('input', () => {
+          if (f.hint) updateHint(f.key);
+          debounceSend(f);
+        });
+      }
+    }
+  }
+
+  // Populate the form from st.settings. Never clobber a control the user is
+  // actively editing (the PC pushes fresh state every second).
+  function fillSettings() {
+    if (!st || !st.settings) return;
+    const s = st.settings;
+    for (const f of SETTINGS_FIELDS) {
+      const el = $('set_' + f.key);
+      if (!el || el === document.activeElement) continue;
+      if (f.type === 'bool') el.checked = !!s[f.key];
+      else el.value = (s[f.key] == null ? '' : s[f.key]);
+      if (f.hint) updateHint(f.key);
+    }
   }
 
   $('toggle').onclick = () => {
@@ -329,6 +502,8 @@
   };
   $('tabLog').onclick = () => setTab('log');
   $('tabMen').onclick = () => setTab('men');
+  $('tabSet').onclick = () => setTab('set');
+  wireSettings();
 
   // Poll harder while a command is in flight so confirmation feels immediate,
   // then back off to keep the phone quiet.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.31.0
+// @version      0.32.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -1960,8 +1960,46 @@
   // Note kick.com is HTTPS, so we can only reach 127.0.0.1 (browsers treat
   // localhost as trustworthy); the phone reaches the same server over the LAN.
   // ----------------------------------------------------------------------
+  // Whitelist of settings the phone remote may edit. ONLY these keys are ever
+  // accepted from /cmd — the remote-connection keys (remoteEnabled, remotePort),
+  // `running` (use start/stop), and pure-UI keys (collapsed, logOpen, pos, size)
+  // are deliberately absent so the phone can neither cut its own link nor fight
+  // the PC over window chrome. Each entry carries the coerce rule and a human
+  // label used in the activity log so every change is confirmed on both panels.
+  const REMOTE_EDIT = {
+    targetChannel:  { type: 'string', trim: true, label: 'Target channel' },
+    message:        { type: 'string', label: 'Message' },
+    intervalSec:    { type: 'int', min: 1, label: 'Interval min (s)' },
+    intervalMaxSec: { type: 'int', min: 1, label: 'Interval max (s)' },
+    cooldownSec:    { type: 'int', min: 0, label: 'Cooldown min (s)' },
+    cooldownMaxSec: { type: 'int', min: 0, label: 'Cooldown max (s)' },
+    randomize:      { type: 'bool', label: 'Randomize' },
+    antiDup:        { type: 'bool', label: 'Anti-duplicate' },
+    rotateKeywords: { type: 'string', label: 'Rotation keywords' },
+    secondEnabled:  { type: 'bool', label: 'Scheduled message' },
+    secondMessage:  { type: 'string', label: 'Scheduled message' },
+    secondValue:    { type: 'int', min: 1, label: 'Scheduled every' },
+    secondUnit:     { type: 'enum', values: ['minutes', 'hours'], label: 'Scheduled unit' },
+    watchEnabled:   { type: 'bool', label: 'Mention watcher' },
+    watchUsername:  { type: 'string', trim: true, label: 'Watch username' },
+    watchScope:     { type: 'enum', values: ['all', 'target'], label: 'Watch scope' },
+    watchSound:     { type: 'bool', label: 'Sound on mention' },
+    watchBareName:  { type: 'bool', label: 'Match name without @' },
+    ignoreSenders:  { type: 'string', label: 'Ignore senders' },
+    webhookEnabled: { type: 'bool', label: 'Webhook forwarding' },
+    webhookUrl:     { type: 'string', label: 'Webhook URL' },
+    webhookFormat:  { type: 'enum', values: ['discord', 'json'], label: 'Webhook format' },
+  };
+
   function buildRemoteState() {
     const secActive = settings.secondEnabled && (settings.secondMessage || '').trim();
+    // Current values of exactly the editable keys, so the phone's Settings form
+    // can populate itself. Booleans are normalized; webhookUrl is intentionally
+    // included (the phone is a trusted LAN device per the product decision).
+    const editable = {};
+    for (const k of Object.keys(REMOTE_EDIT)) {
+      editable[k] = REMOTE_EDIT[k].type === 'bool' ? !!settings[k] : settings[k];
+    }
     return {
       version: VERSION,
       running: !!settings.running,
@@ -1980,10 +2018,64 @@
       unread: unreadMen,
       log: logLines.slice(-40),
       mentions: mentionLog.slice(-40),
+      settings: editable,
     };
   }
 
+  // Apply a batch of {key: value} changes coming from the phone remote. Every
+  // value is validated/coerced against REMOTE_EDIT here (never trust the wire),
+  // no-ops are dropped, and each real change is logged so it shows on both the
+  // PC panel and the phone's mirrored Log tab.
+  function applyRemoteSettings(changes) {
+    if (!changes || typeof changes !== 'object') return;
+    const truncate = (v) => {
+      const s = String(v);
+      return s.length > 40 ? s.slice(0, 40) + '…' : s;
+    };
+    const fmtVal = (spec, v) => (spec.type === 'bool' ? (v ? 'on' : 'off') : truncate(v));
+
+    let changed = false;
+    for (const key of Object.keys(changes)) {
+      const spec = REMOTE_EDIT[key];
+      if (!spec) continue; // not editable / excluded key — ignore silently
+      const raw = changes[key];
+      let val;
+      if (spec.type === 'int') {
+        val = parseInt(raw, 10);
+        if (!Number.isFinite(val)) continue; // unparseable number — skip
+        if (val < spec.min) val = spec.min;   // clamp up to the minimum
+      } else if (spec.type === 'bool') {
+        val = raw === true;
+      } else if (spec.type === 'enum') {
+        val = String(raw);
+        if (!spec.values.includes(val)) continue; // not an allowed value — reject
+      } else { // string
+        val = String(raw);
+        if (spec.trim) val = val.trim(); // only channel/username are trimmed
+      }
+      const old = settings[key];
+      if (val === old) continue; // no change — don't log a no-op
+      settings[key] = val;
+      changed = true;
+      log(`Remote: ${spec.label}: "${fmtVal(spec, old)}" → "${fmtVal(spec, val)}"`);
+    }
+
+    if (!changed) return;
+    // Persist, push every value back into the PC controls, then re-apply the
+    // side effects those controls' own handlers would have run.
+    saveSettings();
+    applySettingsToUI(); // covers updateTimingReadouts / syncWatchControls / updateExplain
+    applyWatcher();      // start/stop the watcher if watchEnabled/username changed
+    updateStatus();
+    if (settings.running) { scheduleNext(); scheduleSecond(); }
+  }
+
   function applyRemoteCommand(cmd) {
+    // Object form: a settings edit from the phone, e.g. {set:{message:'!fish'}}.
+    if (cmd && typeof cmd === 'object') {
+      if (cmd.set && typeof cmd.set === 'object') applyRemoteSettings(cmd.set);
+      return;
+    }
     switch (cmd) {
       case 'start':
         if (!settings.running) { start(); log('Remote: start'); }

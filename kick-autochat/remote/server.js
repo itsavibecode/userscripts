@@ -20,7 +20,7 @@ const path = require('path');
 // Version of the remote (this server + remote.html). Tracked separately from the
 // userscript, which ships and updates on its own. Declared here and injected
 // into the page at serve time so there's one source of truth.
-const REMOTE_VERSION = '1.1.0';
+const REMOTE_VERSION = '1.2.0';
 
 const PORT = Number(process.env.PORT || 3300);
 const HTML = path.join(__dirname, 'remote.html');
@@ -85,7 +85,10 @@ const server = http.createServer(async (req, res) => {
   // Phone: queue a command for the userscript.
   if (url === '/cmd' && req.method === 'POST') {
     const d = await readBody(req);
-    if (d.cmd) commands.push(String(d.cmd));
+    // Accept a plain string ('start') OR an object ({set:{message:'…'}}). Do NOT
+    // stringify: an object command must survive intact to the userscript, which
+    // routes it through applyRemoteCommand. The broker holds no opinion on shape.
+    if (d.cmd !== undefined && d.cmd !== null) commands.push(d.cmd);
     return json(res, 200, { ok: true, queued: commands.length });
   }
 
