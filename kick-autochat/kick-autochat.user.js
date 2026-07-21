@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.30.0
+// @version      0.31.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -1052,6 +1052,7 @@
         channel: currentChannel() || 'iceposeidon',
         sender: 'test_user',
         message: `test mention for @${watchName() || 'you'} from Kick Auto-Chat`,
+        kind: 'mention',
         isReply: false,
         text: `test_user: test mention for @${watchName() || 'you'}`,
         ts: new Date().toISOString(),
@@ -1363,6 +1364,14 @@
     return ` · ${label} ${fmtShort(secondNextSendAt - Date.now())}`;
   }
 
+  // Title-bar tail showing the active mention-watch scope, so it's visible even
+  // when the panel is collapsed. Empty when the watcher is off or no username set.
+  function watchTitleTail() {
+    if (!settings.watchEnabled || !watchName()) return '';
+    if (settings.watchScope === 'target') return ` · 👁 @${targetChannel() || '?'}`;
+    return ' · 👁 all';
+  }
+
   function updateSecondStatus() {
     if (!ui.secStatus) return;
     const msg = (settings.secondMessage || '').trim();
@@ -1382,9 +1391,10 @@
     // Running but on the wrong channel → paused, nothing is sent here.
     if (settings.running && !isOnTarget()) {
       ui.status.innerHTML = `Paused — not on <b>@${target}</b> (here: @${currentChannel() || '—'})`;
+      const wtail = watchTitleTail();
       ui.titleEl.textContent = settings.collapsed
-        ? `Paused @${target}`
-        : `${TITLE} · paused`;
+        ? `Paused @${target}${wtail}`
+        : `${TITLE} · paused${wtail}`;
       return;
     }
 
@@ -1392,16 +1402,17 @@
       const secs = Math.max(0, Math.ceil((nextSendAt - Date.now()) / 1000));
       ui.status.innerHTML = `Running on <b>@${target}</b> — next in <b>${secs}s</b> · sent ${sendCount}${settings.randomize ? ' · rand' : ''}`;
       // Mirror into the title bar so it's visible even when collapsed, including
-      // the scheduled-message countdown (e.g. !claim 3h59m).
-      const tail = secondTitleTail();
+      // the scheduled-message countdown (e.g. !claim 3h59m) and the watch scope.
+      const tail = secondTitleTail() + watchTitleTail();
       ui.titleEl.textContent = settings.collapsed
         ? `${secs}s · ${sendCount} sent${tail}`
         : `${TITLE} · ${secs}s · ${sendCount} sent${tail}`;
     } else {
       ui.status.innerHTML = `Idle · target @${target} · sent ${sendCount}`;
+      const wtail = watchTitleTail();
       ui.titleEl.textContent = settings.collapsed
-        ? `Idle · ${sendCount} sent`
-        : TITLE;
+        ? `Idle · ${sendCount} sent${wtail}`
+        : `${TITLE}${wtail}`;
     }
   }
 
@@ -1625,22 +1636,53 @@
 
     let body;
     if (settings.webhookFormat === 'discord') {
-      const who = data.sender || 'someone';
-      const verb = data.kind === 'reply' ? 'replied to you'
-        : data.kind === 'quote' ? `replied to @${data.replyTo}'s message that tagged you`
-        : 'mentioned you';
-      let content = `**${who}** ${verb} in kick.com/${data.channel} — ${data.tsLocal}\n> ${data.message}`;
-      // For a quote match, include what was quoted — that's where your name was.
-      if (data.kind === 'quote' && data.replyQuote) {
-        content += `\n(in reply to: ${data.replyQuote.slice(0, 200)})`;
+      const channel = data.channel || '';
+      const chSuffix = channel ? ` · #${channel}` : '';
+      const titleBase = data.kind === 'reply' ? 'Replied to you'
+        : data.kind === 'quote' ? 'Reply mentioning you'
+        : 'Mentioned you';
+      const color = data.kind === 'reply' ? 4890111      // 0x4a9fff blue
+        : data.kind === 'quote' ? 16761446               // 0xffc266 amber
+        : 5504536;                                        // 0x53fc18 green
+
+      // Build the field list conditionally — Discord rejects a field with an
+      // empty value, so only push fields that actually carry content.
+      const fields = [];
+      if (channel) {
+        fields.push({
+          name: 'Channel',
+          value: `[kick.com/${channel}](https://kick.com/${channel})`,
+          inline: true,
+        });
       }
+      if (data.kind === 'quote' && data.replyQuote) {
+        fields.push({
+          name: 'In reply to' + (data.replyTo ? ` @${data.replyTo}` : ''),
+          value: data.replyQuote.slice(0, 300),
+        });
+      }
+
+      const embed = {
+        author: { name: data.sender || 'someone' },
+        title: titleBase + chSuffix,
+        description: (data.message && data.message.trim())
+          ? data.message.slice(0, 1000)
+          : '(no text)',
+        color,
+        timestamp: data.ts,
+        footer: { text: 'Kick Auto-Chat' + (channel ? ` · kick.com/${channel}` : '') },
+      };
+      if (channel) embed.url = `https://kick.com/${channel}`;
+      if (fields.length) embed.fields = fields;
+
       body = JSON.stringify({
         username: 'Kick Auto-Chat',
-        content,
+        embeds: [embed],
         // Never let a chat message trigger @everyone/@here pings in Discord.
         allowed_mentions: { parse: [] },
       });
     } else {
+      // Raw JSON: spreads all data fields (channel included) plus a source tag.
       body = JSON.stringify({ source: 'kick-autochat', ...data });
     }
 
