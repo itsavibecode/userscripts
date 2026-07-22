@@ -203,6 +203,10 @@
           <option value="json">Generic JSON</option>
         </select></label>
     </div>
+    <div class="setGrp">
+      <div class="setH">Shoovy</div>
+      <label class="chk"><input type="checkbox" id="set_chatMonitor" /> <span>Alert on new $CHAT 24h lows (target must be shoovy; needs the server running)</span></label>
+    </div>
     <div class="note">Changes apply to the PC instantly and appear in the Log tab.</div>
   </div>
 </div>
@@ -435,6 +439,7 @@
     { key: 'webhookEnabled', type: 'bool' },
     { key: 'webhookUrl', type: 'text' },
     { key: 'webhookFormat', type: 'select' },
+    { key: 'chatMonitor', type: 'bool' },
   ];
 
   const sendTimers = {};

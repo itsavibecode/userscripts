@@ -20,14 +20,29 @@ const path = require('path');
 // Version of the remote (this server + remote.html). Tracked separately from the
 // userscript, which ships and updates on its own. Declared here and injected
 // into the page at serve time so there's one source of truth.
-const REMOTE_VERSION = '1.3.0';
+const REMOTE_VERSION = '1.4.0';
 
 const PORT = Number(process.env.PORT || 3300);
 const HTML = path.join(__dirname, 'remote.html');
 
+// $CHAT (Chat Hype Index) 24h-low monitor. The shoovy.wtf stocks API sends NO
+// Access-Control-Allow-Origin header, so the kick.com userscript CANNOT fetch it
+// from the browser (CORS). Node has no such restriction, so the SERVER polls it
+// and pushes a {chatLow:{…}} command to the userscript via the normal /sync
+// command channel. Only polls while a connected userscript reports chatMonitor.
+const CHAT_API = 'https://shoovy.wtf/api/stocks';
+const CHAT_SYMBOL = 'CHAT';
+const CHAT_POLL_MS = 30000;            // how often to hit the API while monitoring
+const CHAT_ALERT_COOLDOWN_MS = 45000;  // min gap between two low alerts
+
 let lastState = null;   // most recent snapshot from the userscript
 let lastStateAt = 0;    // when it arrived, so we can tell if the PC went away
 let commands = [];      // queued commands waiting for the userscript to collect
+
+// $CHAT poll state.
+let chatLastLow = null; // last day_low we've seen (null = need to re-baseline)
+let chatPollAt = 0;     // epoch ms of the last API poll (rate-limits polling)
+let chatAlertAt = 0;    // epoch ms of the last alert we pushed (cooldown)
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -143,6 +158,57 @@ server.on('error', (err) => {
   console.error('');
   process.exit(1);
 });
+
+// Pure decision so the alert logic is testable in isolation. Given the previous
+// tracked low, the freshly fetched low, when we last alerted, and now, decide
+// whether to alert and what low to store. Alert ONLY on a strict decrease, and
+// only if the cooldown has elapsed; a null prevLow is the first-sight baseline
+// (store it, never alert); equal or higher just tracks the rolling low.
+function decideChatAlert(prevLow, low, lastAlertAt, now) {
+  if (prevLow === null || prevLow === undefined) {
+    return { alert: false, newLow: low }; // baseline — no alert
+  }
+  if (low < prevLow) {
+    return { alert: (now - lastAlertAt) >= CHAT_ALERT_COOLDOWN_MS, newLow: low };
+  }
+  return { alert: false, newLow: low };   // equal/higher — track, don't alert
+}
+
+// Poll shoovy.wtf for a new $CHAT 24h low and queue an alert if one appears.
+// We poll here (not in the browser) because the API has no CORS header, so a
+// kick.com page can't read it. Only runs while a connected userscript reports
+// chatMonitor === true; otherwise it re-baselines so a resumed watch is clean.
+async function maybePollChat() {
+  const shouldPoll = lastState && (Date.now() - lastStateAt < 8000) && lastState.chatMonitor === true;
+  if (!shouldPoll) {
+    chatLastLow = null; // re-baseline cleanly next time monitoring resumes
+    return;
+  }
+  const now = Date.now();
+  if (now - chatPollAt < CHAT_POLL_MS) return;
+  chatPollAt = now;
+  try {
+    const r = await fetch(CHAT_API);
+    const data = await r.json();
+    const q = data && Array.isArray(data.quotes)
+      ? data.quotes.find((x) => x && x.symbol === CHAT_SYMBOL) : null;
+    if (!q || !Number.isFinite(q.day_low)) return;
+    const low = q.day_low;
+    const d = decideChatAlert(chatLastLow, low, chatAlertAt, now);
+    if (d.alert) {
+      // Object command passes through /sync intact to applyRemoteCommand.
+      commands.push({ chatLow: { low, prev: chatLastLow, price: q.price, change_pct: q.change_pct } });
+      chatAlertAt = now;
+    }
+    chatLastLow = d.newLow;
+  } catch (e) {
+    console.error('$CHAT poll failed:', (e && e.message) || e);
+  }
+}
+
+// ~10s tick; maybePollChat rate-limits the actual API hit to CHAT_POLL_MS. The
+// extra .catch is belt-and-suspenders so a rejection can never crash the server.
+setInterval(() => { maybePollChat().catch((e) => console.error('$CHAT poll error:', (e && e.message) || e)); }, 10000);
 
 server.listen(PORT, '0.0.0.0', () => {
   const nets = os.networkInterfaces();

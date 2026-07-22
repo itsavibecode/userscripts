@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.33.0
+// @version      0.34.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -69,6 +69,7 @@
     webhookFormat: 'discord', // 'discord' | 'json'
     remoteEnabled: false,   // mirror state to / take commands from the local remote server
     remotePort: 3300,       // must match the port server.js is listening on
+    chatMonitor: false,     // alert on a new $CHAT (Chat Hype Index) 24h low — only when target=shoovy AND the remote server is polling shoovy.wtf (the browser can't, no CORS)
     running: false,
     collapsed: false,
     explainOpen: true,         // "What will happen" summary expanded
@@ -855,6 +856,11 @@
               title="Whether this tab can reach the local remote server."></div>
           </div>
           <div class="kac-div"></div>
+          <div class="kac-set-h">$CHAT MONITOR (SHOOVY)</div>
+          <label class="kac-check"
+            title="Watch the $CHAT (Chat Hype Index) ticker on shoovy.wtf/stocks and alert (log + beep + optional webhook) whenever it prints a new 24-hour low. ONLY active when the Target channel is 'shoovy' AND the remote server (the .bat) is running — the shoovy.wtf API sends no CORS header, so the browser can't read it directly; the local server polls it and pushes the alert here.">
+            <input type="checkbox" id="kac-chat-en" /> Alert on new $CHAT 24h lows</label>
+          <div class="kac-div"></div>
           <div class="kac-set-h">BACKUP</div>
           <div class="kac-btns">
             <button class="kac-btn kac-btn-sm" id="kac-export"
@@ -920,6 +926,7 @@
       remWrap: p.querySelector('#kac-rem-wrap'),
       remPort: p.querySelector('#kac-rem-port'),
       remStatus: p.querySelector('#kac-rem-status'),
+      chatEn: p.querySelector('#kac-chat-en'),
       tabLog: p.querySelector('#kac-tab-log'),
       tabMen: p.querySelector('#kac-tab-men'),
       tabSet: p.querySelector('#kac-tab-set'),
@@ -1052,6 +1059,11 @@
       remoteOk = null;
       saveSettings();
       updateRemoteStatus();
+    });
+    ui.chatEn.addEventListener('change', () => {
+      settings.chatMonitor = ui.chatEn.checked;
+      saveSettings();
+      updateExplain();
     });
     ui.whTest.addEventListener('click', () => {
       if (!(settings.webhookUrl || '').trim()) { log('Webhook: paste a URL first.', true); return; }
@@ -1188,6 +1200,7 @@
     ui.remEn.checked = settings.remoteEnabled;
     ui.remPort.value = settings.remotePort;
     ui.remWrap.classList.toggle('hidden', !settings.remoteEnabled);
+    ui.chatEn.checked = settings.chatMonitor;
     updateRemoteStatus();
     syncWatchControls();
     updateMenBadge();
@@ -1702,6 +1715,52 @@
       .catch((e) => log(`Webhook error: ${e.message} (blocked by CORS?)`, true));
   }
 
+  // Dedicated webhook for a $CHAT new-24h-low alert (pushed by the server). Kept
+  // separate from postWebhook so the Discord embed is a distinct RED market-alert
+  // card rather than a mention card. Same enable/URL/format gating as postWebhook.
+  function postChatLowWebhook(a) {
+    if (!settings.webhookEnabled) return;
+    const url = (settings.webhookUrl || '').trim();
+    if (!url) return;
+    const n2 = (v) => Number(v).toFixed(2);
+
+    let body;
+    if (settings.webhookFormat === 'discord') {
+      body = JSON.stringify({
+        username: 'Kick Auto-Chat',
+        embeds: [{
+          title: '$CHAT — new 24h low',
+          url: 'https://shoovy.wtf/stocks#stocks',
+          color: 15158332, // 0xE74C3C red
+          fields: [
+            { name: 'New low', value: '$' + n2(a.low), inline: true },
+            { name: 'Previous', value: '$' + n2(a.prev), inline: true },
+            { name: 'Price', value: '$' + n2(a.price), inline: true },
+            { name: 'Change %', value: n2(a.change_pct) + '%', inline: true },
+          ],
+          footer: { text: 'shoovy.wtf/stocks' },
+          timestamp: new Date().toISOString(),
+        }],
+        // Never let an alert trigger @everyone/@here pings in Discord.
+        allowed_mentions: { parse: [] },
+      });
+    } else {
+      // Raw JSON: the alert fields plus a source/type tag for a custom endpoint.
+      body = JSON.stringify({
+        source: 'kick-autochat',
+        type: 'chatLow',
+        low: a.low,
+        prev: a.prev,
+        price: a.price,
+        change_pct: a.change_pct,
+      });
+    }
+
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+      .then((r) => { if (!r.ok) log(`Webhook failed: HTTP ${r.status}`, true); })
+      .catch((e) => log(`Webhook error: ${e.message} (blocked by CORS?)`, true));
+  }
+
   // Local date + time, e.g. "7/16/26, 2:54:07 PM". Mentions outlive the session
   // now, so a bare clock time would be ambiguous.
   function stampLocal(d) {
@@ -2000,6 +2059,7 @@
     webhookEnabled: { type: 'bool', label: 'Webhook forwarding' },
     webhookUrl:     { type: 'string', label: 'Webhook URL' },
     webhookFormat:  { type: 'enum', values: ['discord', 'json'], label: 'Webhook format' },
+    chatMonitor:    { type: 'bool', label: '$CHAT 24h-low monitor' },
   };
 
   function buildRemoteState() {
@@ -2027,6 +2087,10 @@
       watchName: watchName(),
       menTotal,
       unread: unreadMen,
+      // EFFECTIVE $CHAT-monitor flag the server keys its polling on: the raw
+      // setting AND the target being shoovy. Kept separate from settings.chatMonitor
+      // (the raw toggle) so the server only polls shoovy.wtf when it should.
+      chatMonitor: !!settings.chatMonitor && targetChannel() === 'shoovy',
       log: logLines.slice(-40),
       mentions: mentionLog.slice(-40),
       settings: editable,
@@ -2082,9 +2146,17 @@
   }
 
   function applyRemoteCommand(cmd) {
-    // Object form: a settings edit from the phone, e.g. {set:{message:'!fish'}}.
+    // Object form: a settings edit from the phone, e.g. {set:{message:'!fish'}},
+    // or a $CHAT low alert pushed by the server, e.g. {chatLow:{low,prev,price,change_pct}}.
     if (cmd && typeof cmd === 'object') {
       if (cmd.set && typeof cmd.set === 'object') applyRemoteSettings(cmd.set);
+      if (cmd.chatLow && typeof cmd.chatLow === 'object') {
+        const a = cmd.chatLow;
+        const n2 = (v) => Number(v).toFixed(2);
+        log('$CHAT new 24h low: $' + n2(a.low) + ' (was $' + n2(a.prev) + ') · price $' + n2(a.price), false);
+        if (settings.watchSound) beep();   // reuse the mention beep so it's audible
+        postChatLowWebhook(a);             // no-ops unless webhook is enabled + URL set
+      }
       return;
     }
     switch (cmd) {
@@ -2346,6 +2418,13 @@
       }
     } else {
       lines.push(`Mention watcher OFF — chat is not being read.`);
+    }
+
+    // $CHAT 24h-low monitor.
+    if (settings.chatMonitor) {
+      lines.push(targetChannel() === 'shoovy'
+        ? `Alerting on new $CHAT 24h lows (needs the remote server running).`
+        : `$CHAT monitor is on but only works when the target channel is shoovy.`);
     }
 
     // Current state.
