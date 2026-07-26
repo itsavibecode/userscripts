@@ -225,6 +225,11 @@
   // show the button as working until the PC's own state proves it landed.
   let pending = null;    // {id, cmd, label, check(st), at}
 
+  // "Is anything running" on the PC — main sender OR any extra (duplicate)
+  // sender. anyRunning arrives from newer userscripts; fall back to the old
+  // main-only `running` flag so this page still works against an older PC.
+  const activeOf = (s) => !s ? false : (s.anyRunning !== undefined ? s.anyRunning : s.running);
+
   async function post(cmd) {
     try {
       await fetch('/cmd', {
@@ -295,7 +300,8 @@
 
   function render() {
     settlePending();
-    $('dot').classList.toggle('on', connected && st && st.running);
+    const active = activeOf(st);
+    $('dot').classList.toggle('on', connected && active);
     // Header carries this page's own version; the footer reports the userscript
     // version on the PC, so a mismatch between the two is visible.
     $('foot').textContent = connected && st && st.version
@@ -312,10 +318,10 @@
       return;
     }
 
-    if (st.running && !st.onTarget) {
+    if (active && !st.onTarget) {
       big.className = 'big paused';
       big.textContent = 'PAUSED — not on @' + (st.target || '?');
-    } else if (st.running) {
+    } else if (active) {
       big.className = 'big run';
       big.textContent = 'RUNNING';
     } else {
@@ -336,7 +342,7 @@
       $('secRow').hidden = true;
     }
 
-    paint('toggle', st.running ? 'Stop' : 'Start', st.running ? 'halt' : 'go');
+    paint('toggle', active ? 'Stop' : 'Start', active ? 'halt' : 'go');
     paint('sendNow', 'Send now', 'sec');
     paint('watchBtn', st.watching ? 'Stop watching' : 'Start watching', st.watching ? 'halt' : 'sec');
 
@@ -502,9 +508,13 @@
 
   $('toggle').onclick = () => {
     if (!st) return;
-    const want = !st.running;
-    press('toggle', want ? 'start' : 'stop', want ? 'Starting…' : 'Stopping…',
-      (s) => s.running === want);
+    // Stop is a GLOBAL kill-switch on the PC (main + every extra sender), so we
+    // confirm it once NOTHING is running; Start brings the main sender back.
+    if (activeOf(st)) {
+      press('toggle', 'stop', 'Stopping…', (s) => !activeOf(s));
+    } else {
+      press('toggle', 'start', 'Starting…', (s) => activeOf(s) === true);
+    }
   };
   $('sendNow').onclick = () => {
     if (!st) return;

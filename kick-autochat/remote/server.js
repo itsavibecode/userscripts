@@ -20,7 +20,7 @@ const path = require('path');
 // Version of the remote (this server + remote.html). Tracked separately from the
 // userscript, which ships and updates on its own. Declared here and injected
 // into the page at serve time so there's one source of truth.
-const REMOTE_VERSION = '1.4.1';
+const REMOTE_VERSION = '1.5.0';
 
 const PORT = Number(process.env.PORT || 3300);
 const HTML = path.join(__dirname, 'remote.html');

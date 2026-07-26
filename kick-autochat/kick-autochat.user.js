@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.35.0
+// @version      0.36.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -599,6 +599,26 @@
     log('Stopped.');
     syncControls();
     updateStatus();
+  }
+
+  // Global kill-switch: stop the main sender AND every extra (duplicate) sender.
+  // Used ONLY by the remote Stop button — the panel's own main Stop stays
+  // main-only, and each extra card's Stop stays that-card-only. The scheduled
+  // (!claim) message follows the main, so stopping the main covers it too.
+  function stopAll() {
+    settings.running = false;
+    for (const s of settings.extraSenders) s.running = false;
+    saveSettings();
+    // Refresh the main button/dot, then each extra card's Start/Stop button +
+    // dot in place (no full renderExtras() rebuild, so expanded/being-edited
+    // cards aren't torn down).
+    syncControls();
+    for (const s of settings.extraSenders) {
+      updateExtraCardControls(s);
+      updateExtraStatus(s);
+    }
+    updateStatus();
+    log('Stopped all senders (remote).');
   }
 
   function sendNow() {
@@ -2556,6 +2576,10 @@
     return {
       version: VERSION,
       running: !!settings.running,
+      // "Is anything running" — main OR any extra sender. Lets the phone's
+      // kill-switch stay available even when only a duplicate is running.
+      anyRunning: !!settings.running
+        || (Array.isArray(settings.extraSenders) && settings.extraSenders.some(s => s && s.running)),
       onTarget: isOnTarget(),
       target: targetChannel(),
       here: currentChannel(),
@@ -2646,7 +2670,9 @@
         if (!settings.running) { start(); log('Remote: start'); }
         break;
       case 'stop':
-        if (settings.running) { stop(); log('Remote: stop'); }
+        // Global kill-switch from the phone: stops the main AND all extras,
+        // even when only a duplicate sender is running.
+        stopAll();
         break;
       case 'sendNow':
         log('Remote: send now');
