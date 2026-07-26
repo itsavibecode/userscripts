@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.34.0
+// @version      0.35.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -76,6 +76,13 @@
     logOpen: true,             // activity-log drawer open (side-by-side) vs hidden
     pos: { left: null, top: null },
     size: { w: null, h: null }, // controls width/height in px once the user resizes
+    // Additional independent senders, each with its own message + timing +
+    // Start/Stop. Purely additive — the main sender and scheduled !claim above
+    // are untouched. Seeded from the current main config by "+ Duplicate sender".
+    // Shape per element:
+    //   { id, message, randomize, intervalSec, intervalMaxSec,
+    //     cooldownSec, cooldownMaxSec, antiDup, running, collapsed }
+    extraSenders: [],
   };
 
   // Your saved settings always win over DEFAULTS: an update never rewrites your
@@ -100,11 +107,21 @@
   }
 
   const settings = loadSettings();
+  // Extra senders may arrive from an old install (absent), a corrupt value, or a
+  // restored backup with partial records — sanitise once up front so the rest of
+  // the code can trust every element has the full shape.
+  normalizeExtraSenders();
 
   // ----------------------------------------------------------------------
   // Runtime state
   // ----------------------------------------------------------------------
   let tickTimer = null;       // 1s UI/scheduler tick
+  // Per-extra-sender runtime, keyed by sender id. NOT persisted (rebuilt on load):
+  //   extraRuntime[id] = { nextSendAt, sendCount, dupCounter }
+  const extraRuntime = {};
+  // Per-extra-sender DOM refs, keyed by sender id, so status updates don't have
+  // to re-query. Rebuilt by renderExtras().
+  const extraCards = {};
   let nextSendAt = 0;         // epoch ms of the next scheduled send
   let lastSendAt = 0;         // epoch ms of the last successful send
   let sendCount = 0;
@@ -403,11 +420,16 @@
   // ----------------------------------------------------------------------
   // Pick a value for this cycle: the fixed min, or a random whole number in
   // [min, max] when randomize is on (order-safe if max < min).
-  function pickSeconds(minV, maxV) {
-    if (!settings.randomize) return minV;
+  // Explicit-randomize variant so extra senders (each with their OWN randomize
+  // flag) can share the exact same picking logic without touching settings.
+  function pickSecondsR(minV, maxV, randomize) {
+    if (!randomize) return minV;
     const lo = Math.min(minV, maxV);
     const hi = Math.max(minV, maxV);
     return lo + Math.floor(Math.random() * (hi - lo + 1));
+  }
+  function pickSeconds(minV, maxV) {
+    return pickSecondsR(minV, maxV, settings.randomize);
   }
 
   function scheduleNext() {
@@ -430,34 +452,131 @@
     secondNextSendAt = Date.now() + secondIntervalMs();
   }
 
+  // The tick timer is shared by the main sender AND every extra sender, so both
+  // the main Start and an extra's Start must be able to spin it up.
+  function ensureTick() {
+    if (!tickTimer) tickTimer = setInterval(tick, 1000);
+  }
+
+  // -- Extra senders: scheduling & eligibility (kept as pure helpers so the
+  //    timing/collision logic is unit-testable in isolation) ----------------
+
+  // Pure: the next-send epoch for a sender given the clock and the shared
+  // lastSendAt floor. Respects the sender's own interval AND its own cooldown
+  // as a floor against the last successful send, exactly like the main sender.
+  function computeExtraNextSendAt(now, sender, lastAt) {
+    const iv = pickSecondsR(sender.intervalSec, sender.intervalMaxSec, sender.randomize);
+    const cd = pickSecondsR(sender.cooldownSec, sender.cooldownMaxSec, sender.randomize);
+    return Math.max(now + iv * 1000, lastAt + cd * 1000);
+  }
+
+  // Pure: is this extra sender allowed to fire right now? Running, its own timer
+  // due, AND respecting the shared minimum gap off the last global send so extras
+  // can never crowd the main/scheduled messages (or each other).
+  function extraSenderEligible(sender, rt, now, lastAt) {
+    if (!sender || !sender.running || !rt) return false;
+    const gap = Math.max(sender.cooldownSec, 3) * 1000;
+    return now >= rt.nextSendAt && now >= lastAt + gap;
+  }
+
+  function scheduleExtra(sender) {
+    const rt = extraRuntime[sender.id];
+    if (!rt) return;
+    rt.nextSendAt = computeExtraNextSendAt(Date.now(), sender, lastSendAt);
+  }
+
+  // The extra sender's text, plus the same anti-dup zero-width tail the main
+  // uses, but driven by the sender's OWN cycling counter. No rotation keywords.
+  function buildExtraText(sender) {
+    const rt = extraRuntime[sender.id];
+    let msg = sender.message || '';
+    if (sender.antiDup && rt) {
+      rt.dupCounter = (rt.dupCounter + 1) % 6;
+      msg += '​'.repeat(rt.dupCounter);
+    }
+    return msg;
+  }
+
+  // Short label for the activity log: "#2 Cx" style (index + first ~12 chars).
+  function extraShortLabel(sender) {
+    const i = settings.extraSenders.indexOf(sender);
+    const n = i >= 0 ? '#' + (i + 1) : '';
+    const m = (sender.message || '').slice(0, 12);
+    return ((n + (m ? ' ' + m : '')).trim()) || 'extra';
+  }
+
+  function sendExtra(sender) {
+    const rt = extraRuntime[sender.id];
+    if (!rt) return false;
+    const text = buildExtraText(sender);
+    // sendRaw enforces isOnTarget(), updates the global lastSendAt, and runs
+    // slow-mode detection — extras go through the exact same gate as the main.
+    if (!sendRaw(text)) return false;
+    rt.sendCount++;
+    log('Sent [' + extraShortLabel(sender) + '] "' + (sender.message || '') + '"');
+    updateExtraStatus(sender);
+    return true;
+  }
+
+  function updateAllExtraStatus() {
+    for (const s of settings.extraSenders) updateExtraStatus(s);
+  }
+
   function tick() {
-    if (!settings.running) return;
+    // Proceed if the main is running OR any extra sender is running, so an
+    // extras-only session still gets serviced even with the main stopped.
+    const anyActive = settings.running || settings.extraSenders.some((s) => s.running);
+    if (!anyActive) return;
     const now = Date.now();
-    if (!isOnTarget()) { updateStatus(); return; }
+    if (!isOnTarget()) { updateStatus(); updateAllExtraStatus(); return; }
 
     // Minimum spacing between ANY two sends (main or scheduled), so the two
     // timers can never post closer together than the cooldown.
     const gap = Math.max(settings.cooldownSec, 3) * 1000;
 
-    // Priority 1: the scheduled message (e.g. !claim). It fires less often, so
-    // when it's due it takes precedence. We also require the cooldown gap since
-    // the last send, so it never lands right on top of a regular message.
-    if (settings.secondEnabled && (settings.secondMessage || '').trim()
-        && now >= secondNextSendAt && now >= lastSendAt + gap) {
-      sendSecond();
-      scheduleSecond();
-      nextSendAt = Math.max(nextSendAt, lastSendAt + gap);
-      updateStatus();
-      return; // skip the main message this tick
+    // The main + scheduled blocks only run when the main sender is running, so
+    // an extras-only session doesn't fire the main message.
+    if (settings.running) {
+      // Priority 1: the scheduled message (e.g. !claim). It fires less often, so
+      // when it's due it takes precedence. We also require the cooldown gap since
+      // the last send, so it never lands right on top of a regular message.
+      if (settings.secondEnabled && (settings.secondMessage || '').trim()
+          && now >= secondNextSendAt && now >= lastSendAt + gap) {
+        sendSecond();
+        scheduleSecond();
+        nextSendAt = Math.max(nextSendAt, lastSendAt + gap);
+        updateStatus();
+        updateAllExtraStatus();
+        return; // skip everything else this tick
+      }
+
+      // Priority 2: the main rotating message (scheduleNext already enforces the
+      // cooldown floor against lastSendAt).
+      if (now >= nextSendAt) {
+        sendMessage();
+        scheduleNext();
+        updateStatus();
+        updateAllExtraStatus();
+        return; // one send per tick
+      }
     }
 
-    // Priority 2: the main rotating message (scheduleNext already enforces the
-    // cooldown floor against lastSendAt).
-    if (now >= nextSendAt) {
-      sendMessage();
-      scheduleNext();
+    // Priority 3: extra senders, in order. Only the FIRST eligible one sends this
+    // tick, so N due senders naturally space out across successive ticks and the
+    // one-send-per-tick invariant holds across ALL senders.
+    for (const s of settings.extraSenders) {
+      const rt = extraRuntime[s.id];
+      if (extraSenderEligible(s, rt, now, lastSendAt)) {
+        sendExtra(s);
+        scheduleExtra(s);
+        updateStatus();
+        updateAllExtraStatus();
+        return;
+      }
     }
+
     updateStatus();
+    updateAllExtraStatus();
   }
 
   function start() {
@@ -468,7 +587,7 @@
     // if you prefer). We honor cooldown from the last send too.
     scheduleNext();
     scheduleSecond();
-    if (!tickTimer) tickTimer = setInterval(tick, 1000);
+    ensureTick();
     log('Started.');
     syncControls();
     updateStatus();
@@ -490,6 +609,99 @@
     sendMessage();
     if (settings.running) scheduleNext();
     updateStatus();
+  }
+
+  // ----------------------------------------------------------------------
+  // Extra senders — lifecycle (add / start / stop / send-now / remove)
+  // ----------------------------------------------------------------------
+  function newExtraId() {
+    return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  function initExtraRuntime(sender) {
+    extraRuntime[sender.id] = { nextSendAt: 0, sendCount: 0, dupCounter: 0 };
+  }
+
+  // Coerce one (possibly partial / restored) record into the full shape, filling
+  // any missing field from the main defaults so the rest of the code can trust it.
+  function normalizeExtra(s) {
+    if (!s || typeof s !== 'object') return null;
+    return {
+      id: (typeof s.id === 'string' && s.id) ? s.id : newExtraId(),
+      message: typeof s.message === 'string' ? s.message : '',
+      randomize: !!s.randomize,
+      intervalSec: Math.max(1, parseInt(s.intervalSec, 10) || DEFAULTS.intervalSec),
+      intervalMaxSec: Math.max(1, parseInt(s.intervalMaxSec, 10) || DEFAULTS.intervalMaxSec),
+      cooldownSec: Math.max(0, parseInt(s.cooldownSec, 10) || DEFAULTS.cooldownSec),
+      cooldownMaxSec: Math.max(0, parseInt(s.cooldownMaxSec, 10) || DEFAULTS.cooldownMaxSec),
+      antiDup: !!s.antiDup,
+      running: !!s.running,
+      collapsed: !!s.collapsed,
+    };
+  }
+
+  function normalizeExtraSenders() {
+    if (!Array.isArray(settings.extraSenders)) { settings.extraSenders = []; return; }
+    settings.extraSenders = settings.extraSenders.map(normalizeExtra).filter(Boolean);
+  }
+
+  // Create a new extra sender seeded from the CURRENT main-sender config.
+  function addExtraFromMain() {
+    const sender = {
+      id: newExtraId(),
+      message: settings.message,
+      randomize: settings.randomize,
+      intervalSec: settings.intervalSec,
+      intervalMaxSec: settings.intervalMaxSec,
+      cooldownSec: settings.cooldownSec,
+      cooldownMaxSec: settings.cooldownMaxSec,
+      antiDup: settings.antiDup,
+      running: false,
+      collapsed: false,
+    };
+    settings.extraSenders.push(sender);
+    initExtraRuntime(sender);
+    saveSettings();
+    renderExtras();
+    const c = extraCards[sender.id];
+    if (c && c.card && c.card.scrollIntoView) c.card.scrollIntoView({ block: 'nearest' });
+  }
+
+  function startExtra(sender) {
+    sender.running = true;
+    saveSettings();
+    scheduleExtra(sender);
+    ensureTick(); // an extra can run even if the main was never started
+    updateExtraCardControls(sender);
+    updateExtraStatus(sender);
+    log('Started [' + extraShortLabel(sender) + '].');
+  }
+
+  function stopExtra(sender) {
+    sender.running = false;
+    saveSettings();
+    updateExtraCardControls(sender);
+    updateExtraStatus(sender);
+    log('Stopped [' + extraShortLabel(sender) + '].');
+  }
+
+  function sendNowExtra(sender) {
+    if (!isOnTarget()) {
+      log(`Blocked — not on @${targetChannel() || '(unset)'} (here: @${currentChannel() || '—'})`, true);
+      return;
+    }
+    sendExtra(sender);
+    if (sender.running) scheduleExtra(sender);
+  }
+
+  function removeExtra(sender) {
+    sender.running = false; // ensure the tick stops servicing it immediately
+    const idx = settings.extraSenders.indexOf(sender);
+    if (idx >= 0) settings.extraSenders.splice(idx, 1);
+    delete extraRuntime[sender.id];
+    saveSettings();
+    renderExtras();
+    log('Removed an extra sender.');
   }
 
   // ----------------------------------------------------------------------
@@ -635,6 +847,27 @@
           linear-gradient(135deg,transparent 0 48%,#5a5a63 48% 56%,transparent 56% 70%,#5a5a63 70% 78%,transparent 78%);
         border-bottom-right-radius:8px;opacity:.8}
       #kac-resize:hover{opacity:1}
+      /* Extra senders */
+      #kac-extras{display:flex;flex-direction:column;gap:6px}
+      #kac-extras:empty{display:none}
+      #kac-extra-add{margin-top:2px}
+      .kac-ex-card{border:1px solid #2a2a30;border-radius:8px;background:#121218;overflow:hidden}
+      .kac-ex-head{display:flex;align-items:center;gap:6px;padding:5px 6px;cursor:pointer;background:#15151b}
+      .kac-ex-dot{width:7px;height:7px;border-radius:50%;background:#666;flex:0 0 auto}
+      .kac-ex-dot.on{background:#53fc18;box-shadow:0 0 6px #53fc18}
+      .kac-ex-prev{flex:0 1 auto;font-weight:700;color:#e7e7ea;min-width:0;max-width:96px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .kac-ex-mini{flex:1 1 auto;min-width:0;font-size:9.5px;color:#9a9aa3;text-align:right;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .kac-ex-mini b{color:#53fc18}
+      .kac-ex-caret{flex:0 0 auto;color:#9a9aa3;font-size:11px}
+      .kac-ex-rm{flex:0 0 auto;background:none;border:none;color:#9a9aa3;font-size:15px;
+        line-height:1;cursor:pointer;padding:0 2px}
+      .kac-ex-rm:hover{color:#ff4757}
+      .kac-ex-body{padding:6px;display:flex;flex-direction:column;gap:6px;border-top:1px solid #2a2a30}
+      .kac-ex-body.hidden{display:none}
+      .kac-ex-go{background:#53fc18;color:#0a0a0a}
+      .kac-ex-stop{background:#ff4757;color:#fff}
     `;
     const style = document.createElement('style');
     style.textContent = css;
@@ -776,6 +1009,12 @@
         </div>
         <div id="kac-status"
           title="Live status: shows whether it's running, the countdown to the next send, and how many messages have been sent this session."></div>
+        <div class="kac-div"></div>
+        <div class="kac-set-h"
+          title="Additional independent senders, each with its own message, timing, and Start/Stop — running alongside (and separate from) the main sender above. Use + Duplicate sender to add one pre-filled from the current main settings.">EXTRA SENDERS</div>
+        <div id="kac-extras"></div>
+        <button class="kac-btn kac-btn-sm" id="kac-extra-add"
+          title="Add another independent sender, pre-filled from the current main Message and timing. Each extra has its own Start/Stop, Send now, and Remove. One message is still sent per second at most across ALL senders, so they never crowd each other.">+ Duplicate sender</button>
         <div id="kac-explain">
           <div id="kac-explain-head"
             title="Plain-English summary of exactly what your current settings will do. Updates live as you change anything. Click to collapse or expand — the state is remembered.">
@@ -941,6 +1180,8 @@
       explainHead: p.querySelector('#kac-explain-head'),
       explainBody: p.querySelector('#kac-explain-body'),
       explainArrow: p.querySelector('#kac-explain-arrow'),
+      extras: p.querySelector('#kac-extras'),
+      extraAdd: p.querySelector('#kac-extra-add'),
       exportBtn: p.querySelector('#kac-export'),
       importBtn: p.querySelector('#kac-import'),
       importFile: p.querySelector('#kac-import-file'),
@@ -1116,6 +1357,7 @@
     });
     ui.toggle.addEventListener('click', () => settings.running ? stop() : start());
     ui.now.addEventListener('click', sendNow);
+    ui.extraAdd.addEventListener('click', addExtraFromMain);
     ui.logtab.addEventListener('click', () => {
       settings.logOpen = !settings.logOpen;
       applyDrawer();
@@ -1214,6 +1456,7 @@
     ui.body.classList.toggle('hidden', settings.collapsed);
     applySize();
     applyDrawer();
+    renderExtras();
   }
 
   // Apply the saved size to the controls column. Height is only applied when
@@ -1320,6 +1563,245 @@
     const normalise = () => writeMMSS(mEl, sEl, settings[key]);
     mEl.addEventListener('change', normalise);
     sEl.addEventListener('change', normalise);
+  }
+
+  // Generic minutes+seconds binder that reads/writes via getter/setter callbacks
+  // instead of a settings KEY — used by the extra-sender cards, which store their
+  // timing on the sender object rather than in `settings`.
+  function bindMMSSObj(mEl, sEl, getter, setter, minTotal, after) {
+    writeMMSS(mEl, sEl, getter());
+    const apply = () => {
+      setter(Math.max(minTotal, readMMSS(mEl, sEl)));
+      if (after) after();
+    };
+    mEl.addEventListener('input', apply);
+    sEl.addEventListener('input', apply);
+    const normalise = () => writeMMSS(mEl, sEl, getter());
+    mEl.addEventListener('change', normalise);
+    sEl.addEventListener('change', normalise);
+  }
+
+  // ---- Extra-sender cards -------------------------------------------------
+  // Tiny element factory: create an element, optionally set a class and a bag of
+  // attributes ({text} sets textContent; everything else is setAttribute).
+  function mkEl(tag, cls, attrs) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (attrs) {
+      for (const k in attrs) {
+        if (k === 'text') e.textContent = attrs[k];
+        else e.setAttribute(k, attrs[k]);
+      }
+    }
+    return e;
+  }
+
+  // Build one coloured INTERVAL/COOLDOWN group (mirrors the main sender's markup)
+  // and hand back the group element plus its input/readout refs.
+  function buildTimingGroup(title, cls) {
+    const group = mkEl('div', 'kac-group ' + cls);
+    const read = mkEl('span', 'kac-g-read');
+    const gh = mkEl('div', 'kac-g-head');
+    gh.append(mkEl('span', 'kac-g-title', { text: title }), read);
+
+    const mEl = mkEl('input', null, { type: 'number', min: '0', step: '1' });
+    const sEl = mkEl('input', null, { type: 'number', min: '0', max: '59', step: '1' });
+    const mMaxEl = mkEl('input', null, { type: 'number', min: '0', step: '1' });
+    const sMaxEl = mkEl('input', null, { type: 'number', min: '0', max: '59', step: '1' });
+
+    const mCell = mkEl('span', 'kac-mm-max');
+    mCell.append(
+      mkEl('span', 'kac-arrow', { text: '→' }),
+      mMaxEl, mkEl('span', 'kac-u', { text: 'm' }),
+      sMaxEl, mkEl('span', 'kac-u', { text: 's' }),
+    );
+
+    const mmss = mkEl('div', 'kac-mmss');
+    mmss.append(
+      mEl, mkEl('span', 'kac-u', { text: 'm' }),
+      sEl, mkEl('span', 'kac-u', { text: 's' }),
+      mCell,
+    );
+    group.append(gh, mmss);
+    return { group, read, mCell, mEl, sEl, mMaxEl, sMaxEl };
+  }
+
+  // Live readout beside each group title (per-sender variant of updateTimingReadouts).
+  function updateExtraReadouts(sender) {
+    const c = extraCards[sender.id];
+    if (!c) return;
+    const lo = (a, b) => Math.min(a, b), hi = (a, b) => Math.max(a, b);
+    const set = (el, a, b, single, verb) => {
+      if (!el) return;
+      if (sender.randomize) {
+        el.textContent = `${fmtMSc(a)}–${fmtMSc(b)}`;
+        el.title = `= ${verb} ${fmtMS(a)} – ${fmtMS(b)} (a random ${a}–${b} seconds, re-rolled each time)`;
+      } else {
+        el.textContent = fmtMSc(single);
+        el.title = `= ${verb} ${fmtMS(single)} (${single} seconds)`;
+      }
+    };
+    set(c.intRead,
+      lo(sender.intervalSec, sender.intervalMaxSec),
+      hi(sender.intervalSec, sender.intervalMaxSec),
+      sender.intervalSec, 'sends every');
+    set(c.coolRead,
+      lo(sender.cooldownSec, sender.cooldownMaxSec),
+      hi(sender.cooldownSec, sender.cooldownMaxSec),
+      sender.cooldownSec, 'never closer than');
+    c.intMaxCell.classList.toggle('hidden', !sender.randomize);
+    c.coolMaxCell.classList.toggle('hidden', !sender.randomize);
+  }
+
+  // Start/Stop button label + colour and the header dot.
+  function updateExtraCardControls(sender) {
+    const c = extraCards[sender.id];
+    if (!c) return;
+    c.toggleBtn.textContent = sender.running ? 'Stop' : 'Start';
+    c.toggleBtn.className = 'kac-btn kac-btn-sm ' + (sender.running ? 'kac-ex-stop' : 'kac-ex-go');
+    c.dot.classList.toggle('on', !!sender.running);
+  }
+
+  // Header dot + preview + mini "next in Xs · sent N" line.
+  function updateExtraStatus(sender) {
+    const c = extraCards[sender.id];
+    const rt = extraRuntime[sender.id];
+    if (!c || !rt) return;
+    c.dot.classList.toggle('on', !!sender.running);
+    c.prev.textContent = (sender.message || '(no text)').slice(0, 18) || '(no text)';
+    if (sender.running) {
+      if (isOnTarget()) {
+        const secs = Math.max(0, Math.ceil((rt.nextSendAt - Date.now()) / 1000));
+        c.mini.innerHTML = `next in <b>${secs}s</b> · sent ${rt.sendCount}`;
+      } else {
+        c.mini.innerHTML = `paused (off-target) · sent ${rt.sendCount}`;
+      }
+    } else {
+      c.mini.innerHTML = `stopped · sent ${rt.sendCount}`;
+    }
+  }
+
+  // Create the DOM for one extra sender and wire every control to mutate the
+  // sender object + persist. Elements are built with createElement (no ids), so
+  // multiple cards never collide.
+  function buildExtraCard(sender) {
+    const card = mkEl('div', 'kac-ex-card');
+    card.dataset.id = sender.id;
+
+    // Header (click toggles collapse; the × removes).
+    const head = mkEl('div', 'kac-ex-head', {
+      title: 'Click to collapse/expand this sender. The dot is green while it is running.',
+    });
+    const dot = mkEl('span', 'kac-ex-dot' + (sender.running ? ' on' : ''));
+    const prev = mkEl('span', 'kac-ex-prev');
+    const mini = mkEl('span', 'kac-ex-mini');
+    const caret = mkEl('span', 'kac-ex-caret', { text: sender.collapsed ? '▸' : '▾' });
+    const rm = mkEl('button', 'kac-ex-rm', { title: 'Remove this sender', text: '×' });
+    head.append(dot, prev, mini, caret, rm);
+
+    // Body.
+    const body = mkEl('div', 'kac-ex-body' + (sender.collapsed ? ' hidden' : ''));
+
+    const msgRow = mkEl('div', 'kac-row');
+    const msgLbl = mkEl('label', null, { text: 'Message', title: 'The exact text this sender posts each time.' });
+    const msgInput = mkEl('input', null, { type: 'text', placeholder: 'message', title: 'The exact text this sender posts each time.' });
+    msgInput.value = sender.message || '';
+    msgRow.append(msgLbl, msgInput);
+
+    const checks = mkEl('div', 'kac-checks');
+    const randLbl = mkEl('label', 'kac-check', { title: 'Randomize this sender’s timing between the Min and Max of each group below, re-rolled each cycle.' });
+    const randCb = mkEl('input', null, { type: 'checkbox' });
+    randCb.checked = !!sender.randomize;
+    randLbl.append(randCb, document.createTextNode(' Randomize'));
+    const dupLbl = mkEl('label', 'kac-check', { title: 'Append invisible zero-width characters so Kick won’t reject identical repeats.' });
+    const dupCb = mkEl('input', null, { type: 'checkbox' });
+    dupCb.checked = !!sender.antiDup;
+    dupLbl.append(dupCb, document.createTextNode(' Anti-duplicate'));
+    checks.append(randLbl, dupLbl);
+
+    const groups = mkEl('div', 'kac-groups');
+    const iv = buildTimingGroup('INTERVAL', 'kac-g-int');
+    const cool = buildTimingGroup('COOLDOWN', 'kac-g-cool');
+    iv.group.title = 'How often this sender posts. Minutes + seconds add together.';
+    cool.group.title = 'Minimum gap before this sender posts again. Minutes + seconds add together.';
+    groups.append(iv.group, cool.group);
+
+    const btns = mkEl('div', 'kac-btns');
+    const toggleBtn = mkEl('button', 'kac-btn kac-btn-sm', { title: 'Start / stop just this sender. Independent of the main Start.' });
+    const nowBtn = mkEl('button', 'kac-btn kac-btn-sm', { text: 'Send now', title: 'Send this sender’s message once, right now (only on the target channel).' });
+    btns.append(toggleBtn, nowBtn);
+
+    body.append(msgRow, checks, groups, btns);
+    card.append(head, body);
+
+    // Stash refs BEFORE wiring so status/readout updaters can find them.
+    extraCards[sender.id] = {
+      card, dot, prev, mini, toggleBtn,
+      intRead: iv.read, coolRead: cool.read,
+      intMaxCell: iv.mCell, coolMaxCell: cool.mCell,
+    };
+
+    // Header collapse / remove.
+    head.addEventListener('click', (e) => {
+      if (e.target === rm) return;
+      sender.collapsed = !sender.collapsed;
+      body.classList.toggle('hidden', sender.collapsed);
+      caret.textContent = sender.collapsed ? '▸' : '▾';
+      saveSettings();
+    });
+    rm.addEventListener('click', (e) => { e.stopPropagation(); removeExtra(sender); });
+
+    // Message + toggles.
+    msgInput.addEventListener('input', () => {
+      sender.message = msgInput.value;
+      saveSettings();
+      updateExtraStatus(sender);
+    });
+    randCb.addEventListener('change', () => {
+      sender.randomize = randCb.checked;
+      updateExtraReadouts(sender);
+      saveSettings();
+      if (sender.running) scheduleExtra(sender);
+      updateExtraStatus(sender);
+    });
+    dupCb.addEventListener('change', () => { sender.antiDup = dupCb.checked; saveSettings(); });
+
+    // Timing. Reschedule if running so a mid-flight change takes effect at once.
+    const afterTiming = () => {
+      updateExtraReadouts(sender);
+      saveSettings();
+      if (sender.running) scheduleExtra(sender);
+      updateExtraStatus(sender);
+    };
+    bindMMSSObj(iv.mEl, iv.sEl, () => sender.intervalSec, (v) => { sender.intervalSec = v; }, 1, afterTiming);
+    bindMMSSObj(iv.mMaxEl, iv.sMaxEl, () => sender.intervalMaxSec, (v) => { sender.intervalMaxSec = v; }, 1, afterTiming);
+    bindMMSSObj(cool.mEl, cool.sEl, () => sender.cooldownSec, (v) => { sender.cooldownSec = v; }, 0, afterTiming);
+    bindMMSSObj(cool.mMaxEl, cool.sMaxEl, () => sender.cooldownMaxSec, (v) => { sender.cooldownMaxSec = v; }, 0, afterTiming);
+
+    // Start/Stop + Send now.
+    toggleBtn.addEventListener('click', () => (sender.running ? stopExtra(sender) : startExtra(sender)));
+    nowBtn.addEventListener('click', () => sendNowExtra(sender));
+
+    // Initial paint.
+    updateExtraCardControls(sender);
+    updateExtraReadouts(sender);
+    updateExtraStatus(sender);
+    return card;
+  }
+
+  // Clear and rebuild every extra-sender card from settings.extraSenders. Called
+  // after load, add, remove, and any wholesale settings apply (restore/remote).
+  function renderExtras() {
+    if (!ui.extras) return;
+    // Prune runtime for senders that no longer exist (e.g. after a restore).
+    const liveIds = new Set(settings.extraSenders.map((s) => s.id));
+    for (const k in extraRuntime) if (!liveIds.has(k)) delete extraRuntime[k];
+    ui.extras.textContent = '';
+    for (const k in extraCards) delete extraCards[k];
+    for (const sender of settings.extraSenders) {
+      if (!extraRuntime[sender.id]) initExtraRuntime(sender);
+      ui.extras.appendChild(buildExtraCard(sender));
+    }
   }
 
   // Compact form for the inline readout: "1m50s", "50s".
@@ -2346,8 +2828,12 @@
         stop();
         Object.keys(settings).forEach((k) => delete settings[k]);
         Object.assign(settings, merged);
+        // Sanitise restored extra senders, and never auto-start any of them off a
+        // restore (mirrors main running:false above) so nothing fires unexpectedly.
+        normalizeExtraSenders();
+        settings.extraSenders.forEach((s) => { s.running = false; });
         saveSettings();
-        applySettingsToUI();
+        applySettingsToUI(); // rebuilds the extra-sender cards + runtime via renderExtras()
         applyWatcher();
         syncControls();
         updateStatus();
@@ -2427,6 +2913,12 @@
         : `$CHAT monitor is on but only works when the target channel is shoovy.`);
     }
 
+    // Extra senders.
+    if (settings.extraSenders.length) {
+      const running = settings.extraSenders.filter((s) => s.running).length;
+      lines.push(`+ ${settings.extraSenders.length} extra sender${settings.extraSenders.length === 1 ? '' : 's'}, ${running} running.`);
+    }
+
     // Current state.
     lines.push(settings.running
       ? `Status: RUNNING.`
@@ -2485,9 +2977,15 @@
       // Resume after navigation/reload if it was left running.
       scheduleNext();
       scheduleSecond();
-      if (!tickTimer) tickTimer = setInterval(tick, 1000);
+      ensureTick();
       syncControls();
     }
+    // Resume any extra senders that were left running, independently of the main.
+    let anyExtraRunning = false;
+    for (const s of settings.extraSenders) {
+      if (s.running) { scheduleExtra(s); anyExtraRunning = true; }
+    }
+    if (anyExtraRunning) ensureTick();
   }
 
   if (document.body) {
