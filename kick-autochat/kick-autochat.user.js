@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.36.0
+// @version      0.37.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -81,7 +81,7 @@
     // are untouched. Seeded from the current main config by "+ Duplicate sender".
     // Shape per element:
     //   { id, message, randomize, intervalSec, intervalMaxSec,
-    //     cooldownSec, cooldownMaxSec, antiDup, running, collapsed }
+    //     cooldownSec, cooldownMaxSec, antiDup, rotateKeywords, running, collapsed }
     extraSenders: [],
   };
 
@@ -117,7 +117,7 @@
   // ----------------------------------------------------------------------
   let tickTimer = null;       // 1s UI/scheduler tick
   // Per-extra-sender runtime, keyed by sender id. NOT persisted (rebuilt on load):
-  //   extraRuntime[id] = { nextSendAt, sendCount, dupCounter }
+  //   extraRuntime[id] = { nextSendAt, sendCount, dupCounter, rotateIndex, lastBase }
   const extraRuntime = {};
   // Per-extra-sender DOM refs, keyed by sender id, so status updates don't have
   // to re-query. Rebuilt by renderExtras().
@@ -485,12 +485,49 @@
     rt.nextSendAt = computeExtraNextSendAt(Date.now(), sender, lastSendAt);
   }
 
-  // The extra sender's text, plus the same anti-dup zero-width tail the main
-  // uses, but driven by the sender's OWN cycling counter. No rotation keywords.
+  // The texts THIS extra sender rotates through: its Message plus any
+  // comma-separated keywords (the keywords only count when its anti-duplicate is
+  // on). Mirrors the main sender's rotationPool().
+  function extraRotationPool(sender) {
+    let pool = [sender.message];
+    if (sender.antiDup && sender.rotateKeywords) {
+      const extra = sender.rotateKeywords.split(',').map(s => s.trim()).filter(Boolean);
+      pool = pool.concat(extra);
+    }
+    pool = pool.filter(s => s && s.length > 0);
+    // De-duplicate exact repeats so random selection is fair and two identical
+    // entries can't cause a back-to-back repeat.
+    pool = [...new Set(pool)];
+    return pool.length ? pool : [sender.message];
+  }
+
+  // The extra sender's text, mirroring buildMessage(): rotate the pool (random
+  // avoiding the last one, or sequential), then append the same anti-dup
+  // zero-width tail — all driven by the sender's OWN runtime slot so senders
+  // never share rotation position or repeat-avoidance state.
   function buildExtraText(sender) {
     const rt = extraRuntime[sender.id];
-    let msg = sender.message || '';
+    const pool = extraRotationPool(sender);
+    let base;
+    if (sender.randomize && pool.length > 1) {
+      // Random order, but never the same text twice in a row (more human).
+      let attempts = 0;
+      do {
+        base = pool[Math.floor(Math.random() * pool.length)];
+        attempts++;
+      } while (rt && base === rt.lastBase && attempts < 12);
+    } else {
+      // Fixed rotation: step through the pool in order.
+      const idx = rt ? rt.rotateIndex : 0;
+      base = pool[idx % pool.length];
+      if (rt) rt.rotateIndex = (rt.rotateIndex + 1) % pool.length;
+    }
+    if (rt) rt.lastBase = base;
+
+    let msg = base;
     if (sender.antiDup && rt) {
+      // Append N invisible zero-width spaces so Kick doesn't see an identical
+      // consecutive message. Cycles 0..5 so it never grows unbounded.
       rt.dupCounter = (rt.dupCounter + 1) % 6;
       msg += '​'.repeat(rt.dupCounter);
     }
@@ -639,7 +676,7 @@
   }
 
   function initExtraRuntime(sender) {
-    extraRuntime[sender.id] = { nextSendAt: 0, sendCount: 0, dupCounter: 0 };
+    extraRuntime[sender.id] = { nextSendAt: 0, sendCount: 0, dupCounter: 0, rotateIndex: 0, lastBase: null };
   }
 
   // Coerce one (possibly partial / restored) record into the full shape, filling
@@ -655,6 +692,7 @@
       cooldownSec: Math.max(0, parseInt(s.cooldownSec, 10) || DEFAULTS.cooldownSec),
       cooldownMaxSec: Math.max(0, parseInt(s.cooldownMaxSec, 10) || DEFAULTS.cooldownMaxSec),
       antiDup: !!s.antiDup,
+      rotateKeywords: typeof s.rotateKeywords === 'string' ? s.rotateKeywords : '',
       running: !!s.running,
       collapsed: !!s.collapsed,
     };
@@ -676,6 +714,7 @@
       cooldownSec: settings.cooldownSec,
       cooldownMaxSec: settings.cooldownMaxSec,
       antiDup: settings.antiDup,
+      rotateKeywords: settings.rotateKeywords,
       running: false,
       collapsed: false,
     };
@@ -1739,6 +1778,15 @@
     dupLbl.append(dupCb, document.createTextNode(' Anti-duplicate'));
     checks.append(randLbl, dupLbl);
 
+    // Rotation keywords — mirrors the main sender's field, shown only while THIS
+    // sender's anti-duplicate is on.
+    const rotTip = "Extra messages to cycle through, separated by commas. The card's Message is always first, then each keyword in turn, then it loops. Only used while this sender's Anti-duplicate is on.";
+    const rotRow = mkEl('div', 'kac-row' + (sender.antiDup ? '' : ' hidden'));
+    const rotLbl = mkEl('label', null, { text: 'Rotation keywords (comma-separated)', title: rotTip });
+    const rotInput = mkEl('input', null, { type: 'text', placeholder: 'e.g. KEKW, LULW, Cx W', title: rotTip });
+    rotInput.value = sender.rotateKeywords || '';
+    rotRow.append(rotLbl, rotInput);
+
     const groups = mkEl('div', 'kac-groups');
     const iv = buildTimingGroup('INTERVAL', 'kac-g-int');
     const cool = buildTimingGroup('COOLDOWN', 'kac-g-cool');
@@ -1751,7 +1799,7 @@
     const nowBtn = mkEl('button', 'kac-btn kac-btn-sm', { text: 'Send now', title: 'Send this sender’s message once, right now (only on the target channel).' });
     btns.append(toggleBtn, nowBtn);
 
-    body.append(msgRow, checks, groups, btns);
+    body.append(msgRow, checks, rotRow, groups, btns);
     card.append(head, body);
 
     // Stash refs BEFORE wiring so status/readout updaters can find them.
@@ -1784,7 +1832,19 @@
       if (sender.running) scheduleExtra(sender);
       updateExtraStatus(sender);
     });
-    dupCb.addEventListener('change', () => { sender.antiDup = dupCb.checked; saveSettings(); });
+    dupCb.addEventListener('change', () => {
+      sender.antiDup = dupCb.checked;
+      rotRow.classList.toggle('hidden', !sender.antiDup);
+      const rt = extraRuntime[sender.id];
+      if (rt) rt.rotateIndex = 0; // restart the cycle when anti-dup toggles
+      saveSettings();
+    });
+    rotInput.addEventListener('input', () => {
+      sender.rotateKeywords = rotInput.value;
+      const rt = extraRuntime[sender.id];
+      if (rt) rt.rotateIndex = 0; // restart the cycle when the list changes
+      saveSettings();
+    });
 
     // Timing. Reschedule if running so a mid-flight change takes effect at once.
     const afterTiming = () => {
