@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.37.0
+// @version      0.37.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -2251,9 +2251,10 @@
       const embed = {
         author: { name: data.sender || 'someone' },
         title: titleBase + chSuffix,
-        description: (data.message && data.message.trim())
-          ? data.message.slice(0, 1000)
-          : '(no text)',
+        // Sender name in the body too, right before the message (as well as in
+        // the embed author), so it reads "who: what" at a glance.
+        description: `**${data.sender || 'someone'}**: `
+          + ((data.message && data.message.trim()) ? data.message.slice(0, 1000) : '(no text)'),
         color,
         timestamp: data.ts,
         footer: { text: 'Kick Auto-Chat' + (channel ? ` · kick.com/${channel}` : '') },
