@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.37.1
+// @version      0.38.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -207,8 +207,11 @@
 
   // The channel slug of the page we're currently on (first path segment).
   function currentChannel() {
-    const seg = location.pathname.split('/').filter(Boolean)[0] || '';
-    return seg.toLowerCase();
+    const parts = location.pathname.split('/').filter(Boolean);
+    // Popout chat lives at /popout/<channel>/chat, so the channel is the SECOND
+    // segment there — otherwise it's the first (/<channel>).
+    if (parts[0] && parts[0].toLowerCase() === 'popout' && parts[1]) return parts[1].toLowerCase();
+    return (parts[0] || '').toLowerCase();
   }
 
   function targetChannel() {
