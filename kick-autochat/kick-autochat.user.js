@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.38.0
+// @version      0.38.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -176,10 +176,24 @@
     return null;
   }
 
+  // The paid "Send Kicks" gift button also has "send" in its label, so a plain
+  // aria-label*="send" match could return it — and clicking it SPENDS Kicks and
+  // leaves the message unsent. Never treat a Kicks/gift/tip control as the
+  // message-send button.
+  function isGiftButton(el) {
+    const label = ((el.getAttribute('aria-label') || '') + ' ' +
+                   (el.getAttribute('title') || '') + ' ' +
+                   (el.textContent || '')).toLowerCase();
+    return /kick|gift|tip|donat/.test(label);
+  }
+
   function findSendButton() {
     for (const sel of SEND_BTN_SELECTORS) {
-      const el = document.querySelector(sel);
-      if (el && !el.disabled) return el;
+      // Consider ALL matches for this selector, not just the first, so a Kicks
+      // button appearing first can't shadow the real send button.
+      for (const el of document.querySelectorAll(sel)) {
+        if (el && !el.disabled && !isGiftButton(el)) return el;
+      }
     }
     return null;
   }
@@ -300,9 +314,11 @@
       }
     }
 
-    // Submit: prefer the send button; fall back to dispatching Enter.
+    // Submit: prefer the send button; fall back to dispatching Enter. Guard the
+    // click against a Kicks/gift button as a final safety net (findSendButton
+    // already excludes them) — clicking Enter can never spend Kicks.
     const btn = findSendButton();
-    if (btn) {
+    if (btn && !isGiftButton(btn)) {
       btn.click();
     } else {
       dispatchEnter(input);
