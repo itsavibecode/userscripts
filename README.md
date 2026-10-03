@@ -9,6 +9,7 @@ every day.
 | [gemini-activity](./gemini-activity) | Manager panel for Gemini My Activity: load everything, then bulk-delete by date or by post with checkboxes and image/text previews. |
 | [kick-autochat](./kick-autochat) | Auto-send a message to a Kick.com chat on a timer without needing window focus, with a draggable GUI, scheduled messages, and a mention watcher. |
 | [kick-chat-cleaner](./kick-chat-cleaner) | Hide emote-only chat messages and collapse duplicate messages (keeping the original) on kick.com. |
+| [kick-gif-clipper](./kick-gif-clipper) | Record (or grab the last 15 s of) a live Kick stream, trim / cut / crop it, and download a GIF. Runs fully in the browser. |
 
 ## Installing any script in this repo
 
