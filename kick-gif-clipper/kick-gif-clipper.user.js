@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.1.0
-// @description  Turn a moment of a live Kick stream into a GIF without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop in a small editor, and download. Everything runs in the browser; nothing is uploaded.
+// @version      0.2.0
+// @description  Turn a moment of a live Kick stream into a GIF (or WebM) without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
 // @run-at       document-idle
@@ -33,7 +33,10 @@
  * plus our own ordered / Floyd-Steinberg dithering. If the Worker cannot be
  * built, the same code runs on the main thread in small chunks.
  *
- * The pure parts (gifenc, timeline, crop, dither, GIF writer) live in
+ * WebM export (optional) uses WebCodecs VideoEncoder plus a small WebM muxer
+ * in the core. Recent clips are kept in IndexedDB on kick.com.
+ *
+ * The pure parts (gifenc, timeline, crop, dither, GIF writer, WebM muxer) live in
  * makeCore(). That one function is (1) used here, (2) stringified into the
  * Worker and (3) exported to Node for the unit tests in test/.
  */
@@ -41,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick
@@ -417,6 +420,111 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       return wr.finish();
     }
 
+    /* ---------------- boomerang ------------------------------------------- */
+    // Forward then back without repeating the turn-around frames:
+    // a b c d -> a b c d c b (then the loop goes back to a).
+    timeline.boomerang = function (seq) {
+      if (seq.length < 3) return seq.slice();
+      return seq.concat(seq.slice(1, -1).reverse());
+    };
+
+    /* ---------------- caption word wrap ----------------------------------- */
+    // Greedy wrap; measure(text) -> width in the same units as maxW. A word
+    // too long for one line is split by characters.
+    function wrapText(text, maxW, measure) {
+      const out = [];
+      for (const para of String(text || '').split('\n')) {
+        const words = para.split(/\s+/).filter(Boolean);
+        let line = '';
+        for (let w of words) {
+          while (w.length > 1 && measure(w) > maxW) {
+            let k = w.length - 1;
+            while (k > 1 && measure(w.slice(0, k)) > maxW) k--;
+            if (line) { out.push(line); line = ''; }
+            out.push(w.slice(0, k));
+            w = w.slice(k);
+          }
+          const t = line ? line + ' ' + w : w;
+          if (!line || measure(t) <= maxW) line = t;
+          else { out.push(line); line = w; }
+        }
+        if (line) out.push(line);
+      }
+      return out;
+    }
+
+    /* ---------------- target size ----------------------------------------- */
+    // GIF bytes scale roughly with width^2 x fps (height follows width, frame
+    // count follows fps). Given a measured (or estimated) size at `cur`, pick
+    // the candidate {w, fps} with the best quality whose predicted size fits
+    // under target (with an 8% safety margin). Keeps fps >= 10 when it can.
+    // Returns null when nothing smaller than `cur` exists.
+    function pickSize(cands, cur, bytesAtCur, target) {
+      const pred = (c) => bytesAtCur * (c.w * c.w * c.fps) / (cur.w * cur.w * cur.fps);
+      const smaller = cands.filter((c) => (c.w < cur.w && c.fps <= cur.fps) || (c.fps < cur.fps && c.w <= cur.w));
+      if (!smaller.length) return null;
+      const fits = smaller.filter((c) => pred(c) <= target * 0.92);
+      const pool = fits.filter((c) => c.fps >= 10).length ? fits.filter((c) => c.fps >= 10) : fits;
+      if (pool.length) return pool.reduce((a, b) => (pred(b) > pred(a) || (pred(b) === pred(a) && b.fps > a.fps) ? b : a));
+      return smaller.reduce((a, b) => (pred(b) < pred(a) ? b : a));
+    }
+
+    /* ---------------- WebM (Matroska) muxer ------------------------------- */
+    // Minimal single-video-track WebM: EBML header, Segment > Info, Tracks,
+    // Clusters of SimpleBlocks. Enough for browsers, chat apps and players.
+    function cat(parts) {
+      let n = 0; for (const p of parts) n += p.length;
+      const out = new Uint8Array(n); let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    }
+    function ebmlSize(n) {
+      for (let len = 1; len <= 8; len++) {
+        if (n < Math.pow(2, 7 * len) - 1) {
+          const b = new Uint8Array(len);
+          let v = n;
+          for (let i = len - 1; i >= 0; i--) { b[i] = v % 256; v = Math.floor(v / 256); }
+          b[0] |= 1 << (8 - len);
+          return b;
+        }
+      }
+      throw new Error('EBML size too large');
+    }
+    function ebmlId(id) { const b = []; while (id > 0) { b.unshift(id & 255); id = Math.floor(id / 256); } return new Uint8Array(b); }
+    function ebmlUint(n) { const b = []; do { b.unshift(n % 256); n = Math.floor(n / 256); } while (n > 0); return new Uint8Array(b); }
+    function ebmlStr(s) { return new Uint8Array(Array.from(s, (c) => c.charCodeAt(0) & 255)); }
+    function ebmlF64(x) { const b = new Uint8Array(8); new DataView(b.buffer).setFloat64(0, x); return b; }
+    function ebml(id, payload) { const p = Array.isArray(payload) ? cat(payload) : payload; return cat([ebmlId(id), ebmlSize(p.length), p]); }
+    // frames: [{data: Uint8Array, tsMs, key}] in timestamp order.
+    function muxWebM(o) {
+      const header = ebml(0x1A45DFA3, [
+        ebml(0x4286, ebmlUint(1)), ebml(0x42F7, ebmlUint(1)), ebml(0x42F2, ebmlUint(4)), ebml(0x42F3, ebmlUint(8)),
+        ebml(0x4282, ebmlStr('webm')), ebml(0x4287, ebmlUint(2)), ebml(0x4285, ebmlUint(2)),
+      ]);
+      const info = ebml(0x1549A966, [
+        ebml(0x2AD7B1, ebmlUint(1000000)),                      // timestamps in ms
+        ebml(0x4D80, ebmlStr('kick-gif-clipper')), ebml(0x5741, ebmlStr('kick-gif-clipper')),
+        ebml(0x4489, ebmlF64(o.durationMs)),
+      ]);
+      const tracks = ebml(0x1654AE6B, [ebml(0xAE, [
+        ebml(0xD7, ebmlUint(1)), ebml(0x73C5, ebmlUint(1)), ebml(0x83, ebmlUint(1)), ebml(0x9C, ebmlUint(0)),
+        ebml(0x86, ebmlStr(o.codecId)),
+        ebml(0xE0, [ebml(0xB0, ebmlUint(o.width)), ebml(0xBA, ebmlUint(o.height))]),
+      ])]);
+      const clusters = [];
+      let cur = null;
+      const flush = () => { if (cur) clusters.push(ebml(0x1F43B675, [ebml(0xE7, ebmlUint(cur.ts))].concat(cur.blocks))); };
+      for (const f of o.frames) {
+        const ts = Math.max(0, Math.round(f.tsMs));
+        if (!cur || f.key || ts - cur.ts > 30000) { flush(); cur = { ts, blocks: [] }; }
+        const rel = ts - cur.ts;
+        const head = new Uint8Array([0x81, (rel >> 8) & 255, rel & 255, f.key ? 0x80 : 0]);
+        cur.blocks.push(ebml(0xA3, cat([head, f.data])));
+      }
+      flush();
+      return cat([header, ebml(0x18538067, [info, tracks].concat(clusters))]);
+    }
+
     /* ---------------- small helpers --------------------------------------- */
     function fmtTime(ms) {
       ms = Math.max(0, ms || 0);
@@ -433,13 +541,15 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       const p = (n) => String(n).padStart(2, '0');
       return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
     }
-    function fileName(pattern, channel, date) {
+    // The pattern's own extension (if .gif / .webm) is swapped for `ext`.
+    function fileName(pattern, channel, date, ext) {
+      ext = ext || 'gif';
       let n = String(pattern || 'kick_{channel}_{date}.gif')
         .split('{channel}').join(channel || 'kick')
         .split('{date}').join(stamp(date));
       n = n.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').trim() || 'kick_clip';
-      if (!/\.gif$/i.test(n)) n += '.gif';
-      return n;
+      n = n.replace(/\.(gif|webm)$/i, '');
+      return n + '.' + ext;
     }
     // Thin a frame list to a lower fps by timestamp (used when capture steps down).
     function decimateByTime(frames, fps) {
@@ -453,6 +563,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     return {
       gifenc, timeline, crop, dither, createWriter, encodeGif, delayCs, effectiveFps,
       loopToRepeat, evenlySpaced, samplePixels, fmtTime, fmtBytes, fileName, stamp, decimateByTime, even, clamp,
+      wrapText, pickSize, muxWebM,
     };
   }
 
@@ -501,16 +612,27 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     loop: ['forever', 'once', '2', '3', '5'],
     palette: ['global', 'frame'],
     dither: ['none', 'ordered', 'fs'],
+    format: ['gif', 'webm', 'both'],
+    targetMB: [0, 5, 8, 10, 25],            // 0 = no limit
+    recentKeep: [0, 3, 5, 10],              // 0 = off
+    capStyle: ['meme', 'subtitle'],
+    capSize: ['s', 'm', 'l'],
   };
   const LABELS = {
     loop: { forever: 'forever', once: 'once', 2: '2 times', 3: '3 times', 5: '5 times' },
     palette: { global: 'global (12 frames)', frame: 'per frame' },
     dither: { none: 'none', ordered: 'ordered (Bayer 4x4)', fs: 'Floyd-Steinberg' },
+    format: { gif: 'GIF', webm: 'WebM', both: 'GIF + WebM' },
+    targetMB: { 0: 'no limit', 5: '5 MB', 8: '8 MB', 10: '10 MB', 25: '25 MB' },
+    recentKeep: { 0: 'off', 3: '3 clips', 5: '5 clips', 10: '10 clips' },
+    capStyle: { meme: 'Meme (outlined)', subtitle: 'Subtitle (dark bar)' },
+    capSize: { s: 'small', m: 'medium', l: 'large' },
   };
   const DEFAULTS = {
     captureFps: 15, captureWidth: 640, maxSeconds: 30, bufferSeconds: 15, armOnLoad: false,
     hotkeys: { record: 'Alt+Shift+KeyR', last: 'Alt+Shift+KeyL', toggle: 'Alt+Shift+KeyG' },
     outWidth: 480, outFps: 15, speed: 1, loop: 'forever', palette: 'global', dither: 'ordered',
+    format: 'gif', targetMB: 0, recentKeep: 5, capStyle: 'meme', capSize: 'm',
     filePattern: 'kick_{channel}_{date}.gif', showCounter: true,
   };
   // dy 56 keeps the pill above Kick's control bar (its fullscreen / theater / settings
@@ -545,6 +667,11 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     s.loop = pick(String(v.loop), CHOICES.loop, DEFAULTS.loop);
     s.palette = pick(v.palette, CHOICES.palette, DEFAULTS.palette);
     s.dither = pick(v.dither, CHOICES.dither, DEFAULTS.dither);
+    s.format = pick(v.format, CHOICES.format, DEFAULTS.format);
+    s.targetMB = pick(Number(v.targetMB), CHOICES.targetMB, DEFAULTS.targetMB);
+    s.recentKeep = pick(Number(v.recentKeep), CHOICES.recentKeep, DEFAULTS.recentKeep);
+    s.capStyle = pick(v.capStyle, CHOICES.capStyle, DEFAULTS.capStyle);
+    s.capSize = pick(v.capSize, CHOICES.capSize, DEFAULTS.capSize);
     s.filePattern = typeof v.filePattern === 'string' && v.filePattern.trim() ? v.filePattern.trim().slice(0, 120) : DEFAULTS.filePattern;
     s.showCounter = typeof v.showCounter === 'boolean' ? v.showCounter : DEFAULTS.showCounter;
     return s;
@@ -683,7 +810,16 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   .kgc-grid2{display:grid;grid-template-columns:auto minmax(0,1fr) auto minmax(0,1fr);gap:6px;align-items:center;margin-bottom:6px}
   .kgc-grid2 select,.kgc-grid2 input{width:100%}
   .kgc-out{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 8px;align-items:center}
-  .kgc-out select{width:100%}
+  .kgc-out select,.kgc-out input[type=text]{width:100%}
+  .kgc select:disabled{opacity:.45}
+  #kgc-recent{width:360px;max-width:calc(100vw - 16px);max-height:min(460px,calc(100vh - 24px))}
+  .kgc-rlist{overflow-y:auto;overflow-x:hidden;min-height:0}
+  .kgc-ritem{display:grid;grid-template-columns:88px minmax(0,1fr);gap:4px 10px;padding:9px 12px;border-bottom:1px solid var(--border);align-items:center}
+  .kgc-ritem img{width:88px;height:50px;object-fit:cover;border-radius:var(--rs);background:#000;grid-row:span 2}
+  .kgc-rmeta{display:flex;flex-direction:column;min-width:0;font-size:11px;color:var(--muted)}
+  .kgc-rmeta b{color:var(--text);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .kgc-ract{display:flex;gap:6px;flex-wrap:wrap}
+  .kgc-ract .kgc-btn{height:24px;font-size:11px;padding:0 9px}
   .kgc-fld{height:28px;min-width:0;border-radius:var(--rs);background:var(--input);border:1px solid var(--border);display:flex;align-items:center;padding:0 7px;font-size:11px;font-variant-numeric:tabular-nums}
   .kgc-est{font-size:11px;color:var(--muted);margin-top:6px}
   .kgc-est b{color:var(--text);font-weight:600}
@@ -693,7 +829,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   .kgc-prog{height:8px;border-radius:999px;background:var(--input);border:1px solid var(--border);overflow:hidden;margin:8px 0}
   .kgc-prog i{display:block;height:100%;width:0;background:var(--accent)}
   .kgc-result{margin:0 12px;border-radius:var(--rs);overflow:hidden;border:1px solid var(--border);background:#000;display:flex;align-items:center;justify-content:center}
-  .kgc-result img{max-width:100%;max-height:260px;display:block}
+  .kgc-result img,.kgc-result video{max-width:100%;max-height:220px;display:block}
   .kgc-kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 10px;font-size:11px;color:var(--muted);padding:8px 12px}
   .kgc-kv b{color:var(--text);font-weight:600;overflow-wrap:anywhere}
   .kgc-link{color:var(--muted)!important;font-size:11px;text-decoration:underline!important;padding:0!important;height:auto!important}
@@ -741,7 +877,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   }
   // Keep the stacking order sensible after fullscreen: pill, editor, settings, modal, toast.
   function restack() {
-    const order = [pill.root, editor && editor.root, settingsUi && settingsUi.root, modalRoot, toastRoot];
+    const order = [pill.root, editor && editor.root, settingsUi && settingsUi.root, recentUi && recentUi.root, modalRoot, toastRoot];
     for (const n of order) if (n && roots.has(n)) show(n);
   }
 
@@ -1039,7 +1175,8 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       el('button', { type: 'button', text: '×', title: 'Turn the rewind buffer off (frees its memory)', 'aria-label': 'Turn rewind buffer off', onclick: () => disarm() })]);
     P.gear = el('button', { class: 'kgc-btn ic', type: 'button', text: '⚙', title: 'Settings: capture fps / width, rewind buffer, hotkeys, output defaults', 'aria-label': 'Settings', onclick: () => toggleSettings() });
     P.min = el('button', { class: 'kgc-btn ic', type: 'button', text: '−', title: 'Collapse to a small GIF button (hotkeys keep working)', 'aria-label': 'Collapse launcher', onclick: () => setCollapsed(true) });
-    P.box = el('div', { class: 'kgc-pillbox' }, [P.grip, P.none, P.rec, P.tc, P.meta, P.note, P.last, P.chip, P.gear, P.min]);
+    P.recent = el('button', { class: 'kgc-btn ic', type: 'button', text: '◷', title: 'Recent clips: reopen one of your last clips (kept across reloads)', 'aria-label': 'Recent clips', onclick: () => toggleRecent() });
+    P.box = el('div', { class: 'kgc-pillbox' }, [P.grip, P.none, P.rec, P.tc, P.meta, P.note, P.last, P.chip, P.recent, P.gear, P.min]);
     P.miniDot = el('i', { hidden: true });
     P.mini = el('button', { class: 'kgc-mini', type: 'button', text: 'GIF', title: 'GIF Clipper - click to expand', 'aria-label': 'Expand GIF Clipper launcher', onclick: () => setCollapsed(false) }, [P.miniDot]);
     P.root.append(P.box, P.mini);
@@ -1094,7 +1231,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     handle.addEventListener('pointercancel', end);
   }
   function setCollapsed(v) { ui.collapsed = v; saveUi(); renderPill(); placePill(); }
-  function setHidden(v) { ui.hidden = v; saveUi(); if (v) { hide(pill.root); if (settingsUi) closeSettings(); } else { show(pill.root); renderPill(); placePill(); } }
+  function setHidden(v) { ui.hidden = v; saveUi(); if (v) { hide(pill.root); if (settingsUi) closeSettings(); closeRecent(); } else { show(pill.root); renderPill(); placePill(); } }
   function hkLabel(combo) { return String(combo).replace(/Key([A-Z])/, '$1').replace(/Digit(\d)/, '$1'); }
 
   function renderPillState(v) {
@@ -1134,6 +1271,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     P.last.setAttribute('aria-label', armed() ? 'Clip the last ' + settings.bufferSeconds + ' seconds' : 'Arm the rewind buffer');
     P.chip.hidden = !armed() || rec;
     P.gear.hidden = rec;
+    P.recent.hidden = rec || !settings.recentKeep;
     renderPillLive();
   }
   function renderPillLive() {
@@ -1162,6 +1300,113 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   setInterval(() => { if (armed() && !recording()) renderPillLive(); }, 1000);
 
   /* ==================================================================== *
+   * recent clips (IndexedDB on kick.com, so a reload never loses a clip)  *
+   * ==================================================================== */
+  // Two stores: 'clips' holds the frames (big), 'meta' holds a small summary,
+  // a thumbnail and the last editor state, so listing never loads frames.
+  const recent = {
+    p: null,
+    open() {
+      if (!this.p) this.p = new Promise((res, rej) => {
+        const r = indexedDB.open('kick-gif-clipper', 1);
+        r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('clips', { keyPath: 'id' }); d.createObjectStore('meta', { keyPath: 'id' }); };
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => { this.p = null; rej(r.error); };
+      });
+      return this.p;
+    },
+    async run(stores, mode, fn) {
+      const d = await this.open();
+      return new Promise((res, rej) => {
+        const t = d.transaction(stores, mode);
+        let out;
+        const r = fn(t);
+        if (r) r.onsuccess = () => { out = r.result; };
+        t.oncomplete = () => res(out);
+        t.onerror = () => rej(t.error);
+        t.onabort = () => rej(t.error || new Error('aborted'));
+      });
+    },
+    list() { return this.run(['meta'], 'readonly', (t) => t.objectStore('meta').getAll()).then((a) => (a || []).sort((x, y) => y.savedAt - x.savedAt)); },
+    load(id) { return this.run(['clips'], 'readonly', (t) => t.objectStore('clips').get(id)); },
+    getMeta(id) { return this.run(['meta'], 'readonly', (t) => t.objectStore('meta').get(id)); },
+    remove(id) { return this.run(['clips', 'meta'], 'readwrite', (t) => { t.objectStore('clips').delete(id); t.objectStore('meta').delete(id); }); },
+    async clear() { return this.run(['clips', 'meta'], 'readwrite', (t) => { t.objectStore('clips').clear(); t.objectStore('meta').clear(); }); },
+    async save(clip) {
+      const keep = settings.recentKeep;
+      if (!keep || typeof indexedDB === 'undefined') return false;
+      const id = clip.id = clip.id || ('c' + Date.now() + Math.random().toString(36).slice(2, 7));
+      const frames = clip.frames.map((f) => ({ t: f.t, blob: f.blob, w: f.w, h: f.h }));
+      const bytes = frames.reduce((a, f) => a + f.blob.size, 0);
+      const meta = { id, channel: clip.channel, startedAt: +clip.startedAt, fps: clip.fps, n: frames.length, durMs: frames.length * 1000 / clip.fps,
+        bytes, thumb: frames[Math.floor(frames.length / 2)].blob, savedAt: Date.now(), edits: null };
+      await this.run(['clips', 'meta'], 'readwrite', (t) => {
+        t.objectStore('clips').put({ id, frames, fps: clip.fps, channel: clip.channel, startedAt: +clip.startedAt, dropped: clip.dropped || 0 });
+        t.objectStore('meta').put(meta);
+      });
+      const all = await this.list();
+      for (const m of all.slice(keep)) await this.remove(m.id);
+      return true;
+    },
+    async saveEdits(id, edits) {
+      const m = await this.getMeta(id);
+      if (!m) return;
+      m.edits = edits;
+      await this.run(['meta'], 'readwrite', (t) => { t.objectStore('meta').put(m); });
+    },
+  };
+  let recentWarned = false;
+  function recentFail(e) {
+    S.lastErr = 'Recent clips: ' + (e && (e.name || e.message));
+    if (!recentWarned) { recentWarned = true; toast('Could not save to Recent clips', '(browser storage full or blocked). The clip is still open.', true); }
+  }
+
+  /* ==================================================================== *
+   * captions (same drawing for the preview and the export)                *
+   * ==================================================================== */
+  const CAP_SIZE = { s: 0.075, m: 0.1, l: 0.13 };
+  function capFont(style, px) {
+    return style === 'meme' ? '900 ' + px + 'px Impact, "Arial Black", "Helvetica Neue", sans-serif'
+      : '700 ' + px + 'px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  }
+  // Draws top / bottom caption text into the box (x, y, w, h).
+  function drawCaption(g, x, y, w, h, cap) {
+    if (!cap || !(cap.top || '').trim() && !(cap.bottom || '').trim()) return;
+    const base = Math.max(8, h * (CAP_SIZE[cap.size] || 0.1));
+    const pad = Math.max(3, h * 0.04);
+    g.save();
+    g.textAlign = 'center'; g.textBaseline = 'top';
+    for (const [raw, pos] of [[cap.top, 'top'], [cap.bottom, 'bottom']]) {
+      let txt = String(raw || '').trim();
+      if (!txt) continue;
+      if (cap.style === 'meme') txt = txt.toUpperCase();
+      let px = base, lines;
+      for (;;) {
+        g.font = capFont(cap.style, px);
+        lines = CORE.wrapText(txt, w - pad * 2, (s) => g.measureText(s).width);
+        if (lines.length <= 3 || px <= base * 0.5) break;
+        px *= 0.85;
+      }
+      const lh = px * 1.12;
+      const blockH = lh * lines.length;
+      let ty = pos === 'top' ? y + pad : y + h - pad - blockH;
+      const cx = x + w / 2;
+      if (cap.style === 'subtitle') {
+        const bw = Math.min(w - pad, Math.max.apply(null, lines.map((l) => g.measureText(l).width)) + px * 0.8);
+        g.fillStyle = 'rgba(0,0,0,0.62)';
+        g.fillRect(cx - bw / 2, ty - px * 0.15, bw, blockH + px * 0.25);
+        g.fillStyle = '#fff';
+        for (const l of lines) { g.fillText(l, cx, ty); ty += lh; }
+      } else {
+        g.lineJoin = 'round'; g.miterLimit = 2;
+        g.lineWidth = Math.max(2, px * 0.16); g.strokeStyle = '#000'; g.fillStyle = '#fff';
+        for (const l of lines) { g.strokeText(l, cx, ty); g.fillText(l, cx, ty); ty += lh; }
+      }
+    }
+    g.restore();
+  }
+
+  /* ==================================================================== *
    * editor                                                                *
    * ==================================================================== */
   let editor = null;
@@ -1183,24 +1428,32 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     return p;
   }
 
-  function openEditor(clip) {
+  function openEditor(clip, edits) {
     if (editor) {
-      // One clip at a time: the old editor is replaced only after a confirm.
-      modal({ title: 'Replace clip?', body: ['The editor already has a clip open. Discard it and open the new one?'], ok: 'Discard and open', danger: true })
-        .then((ok) => { if (ok) { closeEditor(); openEditor(clip); } else clip.frames.length = 0; });
+      // One clip at a time. A clip saved in Recent is only closed, not lost.
+      const saved = !!editor.clip.id;
+      modal({ title: 'Replace clip?', body: [saved ? 'Close the current clip and open the new one? The current one stays in Recent clips.' : 'The editor already has a clip open. Discard it and open the new one?'],
+        ok: saved ? 'Close and open' : 'Discard and open', danger: !saved })
+        .then((ok) => { if (ok) { closeEditor(); openEditor(clip, edits); } else if (!clip.id) clip.frames.length = 0; });
       return;
     }
     if (settingsUi) closeSettings();
+    closeRecent();
     const f0 = clip.frames[0];
     clip.w = f0.w; clip.h = f0.h;
     const n = clip.frames.length;
     const E = editor = {
       clip, n, segs: timeline.reset(n), sel: { from: 0, to: n }, play: 0, playing: false, playTimer: 0,
       mode: 'trim', crop: null, aspect: null, loopPreview: true,
-      out: { width: settings.outWidth, fps: Math.min(settings.outFps, clip.fps), speed: settings.speed, loop: settings.loop, palette: settings.palette, dither: settings.dither },
+      out: { width: settings.outWidth, fps: Math.min(settings.outFps, clip.fps), speed: settings.speed, loop: settings.loop, palette: settings.palette, dither: settings.dither,
+        format: settings.format, targetMB: settings.targetMB, boomerang: false },
+      cap: { top: '', bottom: '', style: settings.capStyle, size: settings.capSize },
       cache: new Map(), pending: new Map(), thumbs: [], closed: false, view: 'edit', job: null, result: null, downloaded: false,
       memBefore: performance.memory ? performance.memory.usedJSHeapSize : 0,
     };
+    if (edits) applyEdits(E, edits);
+    if (!clip.id) recent.save(clip).then((ok) => { if (ok && editor === E) { E.saved = true; renderEditor(); } }).catch((e) => { clip.id = null; recentFail(e); });
+    else E.saved = true;
     buildEditorDom(E);
     renderEditor();
     show(E.root);
@@ -1208,6 +1461,44 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     makeThumbs(E);
     drawPreview();
     setTimeout(() => E.prevCanvas.focus(), 0);
+  }
+
+  // Editor state that Recent clips remembers (validated on the way back in).
+  function snapshotEdits(E) {
+    return { segs: E.segs, sel: E.sel, crop: E.crop, aspect: E.aspect, out: E.out, cap: E.cap };
+  }
+  function applyEdits(E, x) {
+    try {
+      const n = E.n, W = E.clip.w, H = E.clip.h;
+      if (Array.isArray(x.segs)) {
+        const segs = timeline.normalize(x.segs.map((s) => ({ from: clampN(s.from | 0, 0, n), to: clampN(s.to | 0, 0, n) })));
+        if (timeline.count(segs) >= 2) E.segs = segs;
+      }
+      if (x.sel) E.sel = timeline.sel(clampN(x.sel.from | 0, 0, n - 1), clampN(x.sel.to | 0, 1, n));
+      if (x.crop && isFinite(x.crop.w)) E.crop = crop.clamp(x.crop, W, H);
+      if (typeof x.aspect === 'number' && x.aspect > 0) E.aspect = x.aspect;
+      const o = x.out || {};
+      E.out.width = pick(Number(o.width), CHOICES.outWidth, E.out.width);
+      E.out.fps = pick(Number(o.fps), CHOICES.outFps, E.out.fps);
+      E.out.speed = pick(Number(o.speed), CHOICES.speed, E.out.speed);
+      E.out.loop = pick(String(o.loop), CHOICES.loop, E.out.loop);
+      E.out.palette = pick(o.palette, CHOICES.palette, E.out.palette);
+      E.out.dither = pick(o.dither, CHOICES.dither, E.out.dither);
+      E.out.format = pick(o.format, CHOICES.format, E.out.format);
+      E.out.targetMB = pick(Number(o.targetMB), CHOICES.targetMB, E.out.targetMB);
+      E.out.boomerang = !!o.boomerang;
+      const c = x.cap || {};
+      E.cap = { top: String(c.top || '').slice(0, 200), bottom: String(c.bottom || '').slice(0, 200),
+        style: pick(c.style, CHOICES.capStyle, E.cap.style), size: pick(c.size, CHOICES.capSize, E.cap.size) };
+    } catch (_) { /* a bad saved state just means a fresh edit */ }
+  }
+  let editsTimer = 0;
+  function persistEdits() {
+    const E = editor;
+    if (!E || !E.clip.id) return;
+    clearTimeout(editsTimer);
+    const id = E.clip.id, snap = JSON.parse(JSON.stringify(snapshotEdits(E)));
+    editsTimer = setTimeout(() => recent.saveEdits(id, snap).catch(() => {}), 600);
   }
 
   function placeEditor(E) {
@@ -1240,7 +1531,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       if (!ui.editor.min) R.style.height = clampN(ui.editor.h || 620, 480, innerHeight * 0.92) + 'px';
     } });
     const title = el('div', { class: 'kgc-title' }, [el('b', { text: 'GIF Clipper' }), el('span', { class: 'v', text: 'v' + VERSION }), E.info,
-      el('div', { class: 'wb' }, [E.minBtn, el('button', { type: 'button', text: '×', title: 'Close the editor (asks before discarding an unsaved clip)', 'aria-label': 'Close editor', onclick: () => askDiscard() })])]);
+      el('div', { class: 'wb' }, [E.minBtn, el('button', { type: 'button', text: '×', title: 'Close the editor. The clip stays in Recent clips (Discard deletes it).', 'aria-label': 'Close editor', onclick: () => askClose() })])]);
     makeDraggable(R, title, (r) => { ui.editor.x = Math.round(r.left); ui.editor.y = Math.round(r.top); saveUi(); });
 
     // preview
@@ -1294,42 +1585,67 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     ]);
     E.secCrop.addEventListener('pointerdown', (e) => { if (E.mode !== 'crop' && e.target !== E.editCropBtn) setMode('crop'); });
     E.secTrim.addEventListener('pointerdown', () => { if (E.mode !== 'trim') setMode('trim'); });
+    // side: caption
+    const cp = E.cap;
+    const capInput = (key, label) => {
+      const i = el('input', { type: 'text', maxlength: '200', value: cp[key], placeholder: label + ' text', 'aria-label': 'Caption ' + label,
+        title: 'Text drawn on the ' + label + ' of every frame. Long text wraps (up to 3 lines) and shrinks to fit.' });
+      i.addEventListener('input', () => { cp[key] = i.value; drawPreview(); renderEditor(); });
+      return i;
+    };
+    E.capTop = capInput('top', 'top'); E.capBottom = capInput('bottom', 'bottom');
+    E.capStyleSel = select(CHOICES.capStyle.map((s) => [s, LABELS.capStyle[s]]), cp.style, 'Caption style', 'Meme: bold white capitals with a black outline, readable on anything. Subtitle: normal text on a dark bar.', (v) => { cp.style = v; drawPreview(); renderEditor(); });
+    E.capSizeSel = select(CHOICES.capSize.map((s) => [s, LABELS.capSize[s]]), cp.size, 'Caption size', 'Text height relative to the GIF height, so it looks the same at any output width.', (v) => { cp.size = v; drawPreview(); renderEditor(); });
+    E.secCap = el('div', { class: 'kgc-sec' }, [
+      el('h4', null, ['Caption', tip('Optional text on the clip, shown on every frame. The preview shows exactly what the export will look like.')]),
+      el('div', { class: 'kgc-out' }, [
+        el('span', { class: 'kgc-lab', text: 'top' }), E.capTop, el('span', { class: 'kgc-lab', text: 'bottom' }), E.capBottom,
+        el('span', { class: 'kgc-lab', text: 'style' }), E.capStyleSel, el('span', { class: 'kgc-lab', text: 'size' }), E.capSizeSel,
+      ]),
+    ]);
     // side: output
     const o = E.out;
-    E.widthSel = select([], o.width, 'Output width', 'GIF width in pixels. Height follows the crop shape. Smaller = much smaller file.', (v) => { o.width = +v; renderEditor(); });
-    E.fpsSel = select([], o.fps, 'Output fps', 'Frames per second in the GIF. Lower fps drops frames evenly and shrinks the file. Cannot exceed the capture fps.', (v) => { o.fps = +v; renderEditor(); });
-    E.speedSel = select(CHOICES.speed.map((s) => [s, s + 'x']), o.speed, 'Playback speed', 'Plays the GIF faster or slower by changing the frame delay; the frames stay the same.', (v) => { o.speed = +v; renderEditor(); });
-    E.loopSel = select(CHOICES.loop.map((l) => [l, LABELS.loop[l]]), o.loop, 'GIF loop', 'How many times the GIF plays. Forever is what chat apps expect.', (v) => { o.loop = v; renderEditor(); });
-    E.palSel = select(CHOICES.palette.map((p) => [p, LABELS.palette[p]]), o.palette, 'Palette', 'Global: one 256-colour table for the whole GIF (smaller, no colour flicker). Per frame: each frame gets its own table (better colour on fast-changing clips, bigger file).', (v) => { o.palette = v; renderEditor(); });
-    E.dithSel = select(CHOICES.dither.map((d) => [d, LABELS.dither[d]]), o.dither, 'Dither', 'Dithering hides colour banding with a fine pattern. Ordered is steady between frames; Floyd-Steinberg looks smoother on stills but shimmers and compresses worse; none is smallest.', (v) => { o.dither = v; renderEditor(); });
+    E.formatSel = select(CHOICES.format.map((f) => [f, LABELS.format[f]]), o.format, 'Output format', 'GIF plays everywhere but is big. WebM is a real video file, usually 10-20x smaller with full colour; most chat apps play it. Both exports one of each.', (v) => { o.format = v; renderEditor(); });
+    E.widthSel = select([], o.width, 'Output width', 'Width in pixels. Height follows the crop shape. Smaller = much smaller file.', (v) => { o.width = +v; renderEditor(); });
+    E.fpsSel = select([], o.fps, 'Output fps', 'Frames per second. Lower fps drops frames evenly and shrinks the file. Cannot exceed the capture fps.', (v) => { o.fps = +v; renderEditor(); });
+    E.speedSel = select(CHOICES.speed.map((s) => [s, s + 'x']), o.speed, 'Playback speed', 'Plays faster or slower by changing the frame timing; the frames stay the same.', (v) => { o.speed = +v; renderEditor(); });
+    E.loopSel = select(CHOICES.loop.map((l) => [l, LABELS.loop[l]]), o.loop, 'GIF loop', 'How many times the GIF plays. Forever is what chat apps expect. (WebM files have no loop count; players loop them themselves.)', (v) => { o.loop = v; renderEditor(); });
+    E.palSel = select(CHOICES.palette.map((p) => [p, LABELS.palette[p]]), o.palette, 'Palette', 'GIF only. Global: one 256-colour table for the whole GIF (smaller, no colour flicker). Per frame: each frame gets its own table (better colour on fast-changing clips, bigger file).', (v) => { o.palette = v; renderEditor(); });
+    E.dithSel = select(CHOICES.dither.map((d) => [d, LABELS.dither[d]]), o.dither, 'Dither', 'GIF only. Dithering hides colour banding with a fine pattern. Ordered is steady between frames; Floyd-Steinberg looks smoother on stills but shimmers and compresses worse; none is smallest.', (v) => { o.dither = v; renderEditor(); });
+    E.limitSel = select(CHOICES.targetMB.map((m) => [m, LABELS.targetMB[m]]), o.targetMB, 'Size limit', 'Make the file fit under a size, e.g. a chat upload cap. A GIF is re-encoded at a lower width, then a lower fps, until it fits; a WebM picks its bitrate from the limit.', (v) => { o.targetMB = +v; renderEditor(); });
+    E.boomChk = el('input', { type: 'checkbox', checked: o.boomerang, 'aria-label': 'Boomerang', title: 'Play forward then backward, so the loop has no jump. Doubles the length (and roughly the size).' });
+    E.boomChk.addEventListener('change', () => { o.boomerang = E.boomChk.checked; renderEditor(); });
     E.est = el('div', { class: 'kgc-est' });
     E.secOut = el('div', { class: 'kgc-sec' }, [
-      el('h4', null, ['Output', tip('These settings only affect the exported GIF. The estimate updates as you change them.')]),
+      el('h4', null, ['Output', tip('These settings only affect the exported file. The estimate updates as you change them.')]),
       el('div', { class: 'kgc-out' }, [
+        el('span', { class: 'kgc-lab', text: 'format' }), E.formatSel,
         el('span', { class: 'kgc-lab', text: 'width' }), E.widthSel, el('span', { class: 'kgc-lab', text: 'fps' }), E.fpsSel,
         el('span', { class: 'kgc-lab', text: 'speed' }), E.speedSel, el('span', { class: 'kgc-lab', text: 'loop' }), E.loopSel,
         el('span', { class: 'kgc-lab', text: 'palette' }), E.palSel, el('span', { class: 'kgc-lab', text: 'dither' }), E.dithSel,
+        el('span', { class: 'kgc-lab', text: 'limit' }), E.limitSel,
       ]),
+      el('label', { class: 'kgc-row', style: 'cursor:pointer;margin-top:8px', title: E.boomChk.title }, [E.boomChk, el('span', { text: 'Boomerang (forward, then backward)' })]),
       E.est,
     ]);
-    E.vEdit = el('div', null, [E.secCrop, E.secTrim, E.secOut]);
+    E.vEdit = el('div', null, [E.secCrop, E.secTrim, E.secCap, E.secOut]);
     // side: exporting
     E.progTxt = el('div', { class: 'kgc-est' }); E.progBar = el('i');
     E.vExp = el('div', { hidden: true }, [el('div', { class: 'kgc-sec' }, [el('h4', { text: 'Exporting' }), E.progTxt, el('div', { class: 'kgc-prog' }, [E.progBar]),
-      el('div', { class: 'kgc-est', text: 'Encoding runs in a background worker; the stream keeps playing.' })])]);
-    // side: done
-    E.resImg = el('img', { alt: 'Exported GIF' });
-    E.resKv = el('div', { class: 'kgc-kv' });
-    E.vDone = el('div', { hidden: true }, [el('div', { class: 'kgc-sec', style: 'border-bottom:0' }, [el('h4', { text: 'Result' })]), el('div', { class: 'kgc-result' }, [E.resImg]), E.resKv,
-      el('div', { class: 'kgc-sec' }, [el('div', { class: 'kgc-row' }, [btn('Back to editor', 'grow', 'Change trim / crop / output and export again', () => setView('edit')), btn('New clip', 'grow', 'Close this clip and go back to the launcher', () => closeEditor())]),
-        el('div', { class: 'kgc-row' }, [el('button', { class: 'kgc-link', type: 'button', text: 'Download did not start?', title: 'Shows a link you can right-click and save', onclick: manualSave })])])]);
+      el('div', { class: 'kgc-est', text: 'Encoding runs in the background; the stream keeps playing.' })])]);
+    // side: done (one block per exported format, filled by showResult)
+    E.resList = el('div');
+    E.vDone = el('div', { hidden: true }, [el('div', { class: 'kgc-sec', style: 'border-bottom:0' }, [el('h4', { text: 'Result' })]), E.resList,
+      el('div', { class: 'kgc-sec' }, [el('div', { class: 'kgc-row' }, [btn('Back to editor', 'grow', 'Change trim / crop / output and export again', () => setView('edit')), btn('New clip', 'grow', 'Close this clip (it stays in Recent clips) and go back to the launcher', () => closeEditor())]),
+        el('div', { class: 'kgc-row' }, [el('button', { class: 'kgc-link', type: 'button', text: 'Download did not start?', title: 'Shows links you can right-click and save', onclick: manualSave })])])]);
     const side = el('div', { class: 'kgc-side' }, [E.vEdit, E.vExp, E.vDone]);
     const body = el('div', { class: 'kgc-ebody' }, [left, side]);
     // footer
-    E.exportBtn = btn('Export GIF', 'acc', 'Encode the GIF with the current trim, crop and output settings', () => startExport());
+    E.exportBtn = btn('Export GIF', 'acc', 'Encode with the current trim, crop, caption and output settings', () => startExport());
     E.cancelBtn = btn('Cancel export', '', 'Stop encoding; nothing is saved', () => cancelExport());
-    E.dlBtn = btn('Download GIF', 'acc', 'Save the GIF to your downloads folder', () => download());
-    const foot = el('div', { class: 'kgc-foot' }, [btn('Discard', 'warn', 'Throw this clip away (asks first)', () => askDiscard()), el('div', { class: 'right' }, [E.cancelBtn, E.exportBtn, E.dlBtn])]);
+    E.dlBtn = btn('Download GIF', 'acc', 'Save the GIF to your downloads folder', () => download('gif'));
+    E.dlWebmBtn = btn('Download WebM', 'acc', 'Save the WebM video to your downloads folder', () => download('webm'));
+    const foot = el('div', { class: 'kgc-foot' }, [btn('Discard', 'warn', 'Delete this clip, including from Recent clips (asks first)', () => askDiscard()), el('div', { class: 'right' }, [E.cancelBtn, E.exportBtn, E.dlWebmBtn, E.dlBtn])]);
     R.append(title, body, foot);
 
     // resizing: persist size; redraw canvases
@@ -1367,7 +1683,9 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     const E = editor; if (!E) return;
     E.view = v;
     E.vEdit.hidden = v !== 'edit'; E.vExp.hidden = v !== 'exp'; E.vDone.hidden = v !== 'done';
-    E.exportBtn.hidden = v !== 'edit'; E.cancelBtn.hidden = v !== 'exp'; E.dlBtn.hidden = v !== 'done';
+    E.exportBtn.hidden = v !== 'edit'; E.cancelBtn.hidden = v !== 'exp';
+    E.dlBtn.hidden = v !== 'done' || !(E.result && E.result.gif);
+    E.dlWebmBtn.hidden = v !== 'done' || !(E.result && E.result.webm);
   }
   function setMode(m) { const E = editor; E.mode = m; renderEditor(); drawPreview(); }
   function setAspect(a) {
@@ -1386,7 +1704,15 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     E.crop = r; renderEditor(); drawPreview();
   }
   const keptIdx = () => timeline.keptIndices(editor.segs);
-  const outIdx = () => timeline.resample(keptIdx(), editor.clip.fps, editor.out.fps);
+  // Output frame order at a given fps: kept frames, thinned, then boomeranged.
+  const outSeq = (fps) => {
+    const s = timeline.resample(keptIdx(), editor.clip.fps, fps || editor.out.fps);
+    return editor.out.boomerang ? timeline.boomerang(s) : s;
+  };
+  const webmOk = () => typeof VideoEncoder === 'function' && typeof VideoFrame === 'function';
+  const fmtList = (f) => (f === 'both' ? ['gif', 'webm'] : [f]);
+  // Starting WebM bitrate when there is no size limit: generous for 480p-ish clips.
+  const webmBitrate = (w, h, fps) => clampN(w * h * fps * 0.25, 400e3, 6e6);
   const firstKept = () => (editor.segs[0] ? editor.segs[0].from : 0);
   const lastKept = () => { const s = editor.segs[editor.segs.length - 1]; return s ? s.to - 1 : 0; };
 
@@ -1404,7 +1730,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     const E = editor; if (!E) return;
     const fps = E.clip.fps;
     const kept = timeline.count(E.segs);
-    E.info.textContent = '· ' + E.clip.channel + ' · ' + fmtTime(E.n * 1000 / fps) + ' · ' + E.n + ' frames';
+    E.info.textContent = '· ' + E.clip.channel + ' · ' + fmtTime(E.n * 1000 / fps) + ' · ' + E.n + ' frames' + (E.saved ? ' · in Recent' : '');
     E.tcCur.textContent = fmtTime(E.play * 1000 / fps);
     E.tcTot.textContent = '/ ' + fmtTime(E.n * 1000 / fps);
     E.secCrop.classList.toggle('active', E.mode === 'crop');
@@ -1432,21 +1758,40 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     const fpsList = CHOICES.outFps.filter((f) => f <= fps).map((f) => [f, String(f)]);
     if (!fpsList.some(([f]) => f === E.out.fps)) E.out.fps = fpsList.length ? fpsList[fpsList.length - 1][0] : fps;
     refill(E.fpsSel, fpsList, E.out.fps);
+    // format-dependent controls
+    if (!webmOk() && E.out.format !== 'gif') E.out.format = 'gif';
+    for (const opt of E.formatSel.options) opt.disabled = opt.value !== 'gif' && !webmOk();
+    E.formatSel.value = E.out.format;
+    const fl = fmtList(E.out.format), hasGif = fl.indexOf('gif') >= 0;
+    for (const s of [E.loopSel, E.palSel, E.dithSel]) s.disabled = !hasGif;
+    E.exportBtn.textContent = 'Export ' + LABELS.format[E.out.format];
     // estimate
-    const frames = outIdx().length;
+    const frames = outSeq().length;
     const sz = crop.outputSize(c, E.out.width || capW);
     const bpp = CFG.bytesPerPixel[E.out.dither] || 0.45;
-    const bytes = frames * sz.w * sz.h * bpp;
+    const gifBytes = frames * sz.w * sz.h * bpp;
+    const secs = frames / (E.out.fps * E.out.speed);
+    const limit = E.out.targetMB * 1024 * 1024;
+    const webmBytes = limit ? Math.min(limit * 0.9, webmBitrate(sz.w, sz.h, E.out.fps) * 2 * secs / 8) : webmBitrate(sz.w, sz.h, E.out.fps) * secs / 8;
     const eff = CORE.effectiveFps(E.out.fps, E.out.speed);
     E.est.textContent = '';
-    E.est.append(el('b', { text: frames + ' frames' }), ' · ' + sz.w + ' x ' + sz.h + ' · ' + eff.toFixed(1) + ' fps · est ', el('b', { text: fmtBytes(Math.round(bytes)) }));
-    const big = bytes > CFG.sizeWarnBytes;
-    E.est.classList.toggle('warn', big);
-    if (big) E.est.append(el('div', { text: 'over 10 MB - lower width or fps' }));
-    if (frames > CFG.maxEditorFrames) E.est.append(el('div', { text: 'over ' + CFG.maxEditorFrames + ' frames - slow to encode and play' }));
-    E.est.title = 'Estimate = frames x width x height x ' + bpp + ' bytes (measured on live camera footage with this dither). Static scenes come out smaller. The real size shows after export. 10 MB is a common chat upload limit.';
+    E.est.append(el('b', { text: frames + ' frames' }), ' · ' + sz.w + ' x ' + sz.h + ' · ' + eff.toFixed(1) + ' fps · ' + fmtTime(secs * 1000));
+    const parts = [];
+    if (hasGif) parts.push(['GIF', gifBytes]);
+    if (fl.indexOf('webm') >= 0) parts.push(['WebM', webmBytes]);
+    const line = el('div');
+    parts.forEach(([k, b], i) => { line.append((i ? ' · ' : 'est ') + k + ' ', el('b', { text: '~' + fmtBytes(Math.round(b)) })); });
+    E.est.append(line);
+    const warnAt = limit || CFG.sizeWarnBytes;
+    const big = hasGif && gifBytes > warnAt;
+    E.est.classList.toggle('warn', big && !limit);
+    if (big && limit) E.est.append(el('div', { text: 'GIF over the limit - export will step width / fps down to fit' }));
+    else if (big) E.est.append(el('div', { text: 'GIF over 10 MB - lower width or fps, set a size limit, or use WebM' }));
+    if (hasGif && frames > CFG.maxEditorFrames) E.est.append(el('div', { text: 'over ' + CFG.maxEditorFrames + ' frames - slow to encode and play' }));
+    E.est.title = 'GIF estimate = frames x width x height x ' + bpp + ' bytes (measured on live camera footage with this dither); static scenes come out smaller. WebM estimate = bitrate x length. The real size shows after export. 10 MB is a common chat upload limit.';
     E.prevCanvas.style.cursor = E.mode === 'crop' ? 'crosshair' : 'pointer';
     setView(E.view);
+    persistEdits();
   }
   function refill(sel, opts, value) {
     const key = opts.map((o) => o.join(':')).join('|');
@@ -1473,9 +1818,13 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       E.pv = { scale: v.scale / d, ox: v.ox / d, oy: v.oy / d };   // in CSS px for pointer math
       const b = bmp || lastBitmap;
       if (b) { try { g.drawImage(b, v.ox, v.oy, v.w, v.h); } catch (_) {} }
+      // Caption inside the crop box: the same drawing the export uses.
+      const cr = crop.toView(E.crop || crop.full(E.clip.w, E.clip.h), v);
+      drawCaption(g, cr.x, cr.y, cr.w, cr.h, E.cap);
       if (!timeline.isKept(E.segs, i)) {
         g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(v.ox, v.oy, v.w, v.h);
-        g.fillStyle = '#ffb454'; g.font = (12 * d) + 'px sans-serif'; g.fillText('removed from the clip', v.ox + 10 * d, v.oy + 20 * d);
+        g.fillStyle = '#ffb454'; g.font = (12 * d) + 'px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+        g.fillText('removed from the clip', v.ox + 10 * d, v.oy + 20 * d);
       }
       if (E.crop || E.mode === 'crop') {
         const r = crop.toView(E.crop || crop.full(E.clip.w, E.clip.h), v);
@@ -1522,7 +1871,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   }
   function startPlay() {
     const E = editor; if (!E) return;
-    const seq = outIdx();
+    const seq = outSeq();
     if (seq.length < 2) return;
     E.playing = true; E.playBtn.textContent = '❚❚'; E.playBtn.setAttribute('aria-label', 'Pause');
     let k = seq.findIndex((x) => x >= E.play);
@@ -1697,118 +2046,264 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     return w;
   }
 
-  async function startExport(forceInline) {
+  // Draws source frame i, cropped and scaled to w x h, plus the caption.
+  function makePrep(E, w, h) {
+    const c = E.crop || crop.full(E.clip.w, E.clip.h);
+    const canvas = new OffscreenCanvas(w, h), g = canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+    g.imageSmoothingQuality = 'high';
+    return {
+      canvas, g,
+      async draw(i) {
+        const b = await createImageBitmap(E.clip.frames[i].blob);
+        const k = b.width / E.clip.w;
+        g.drawImage(b, c.x * k, c.y * k, c.w * k, c.h * k, 0, 0, w, h);
+        b.close();
+        drawCaption(g, 0, 0, w, h, E.cap);
+      },
+    };
+  }
+
+  async function startExport() {
     const E = editor; if (!E || E.job) return;
     stopPlay();
-    const seq = outIdx();
+    let fmts = fmtList(E.out.format);
+    if (fmts.indexOf('webm') >= 0 && !webmOk()) {
+      toast('WebM is not available', 'in this browser (no WebCodecs). Exporting GIF only.', true);
+      fmts = ['gif'];
+    }
+    const seq = outSeq();
     if (seq.length < 2) { toast('Nothing to export.', 'Keep at least 2 frames.', true); return; }
-    if (seq.length > CFG.maxEditorFrames && !forceInline) {
+    if (fmts.indexOf('gif') >= 0 && seq.length > CFG.maxEditorFrames) {
       const ok = await modal({ title: 'Long GIF', body: ['This GIF has ' + seq.length + ' frames. GIFs that long are slow to encode and slow to play in chat apps.', 'Lower the fps or trim the clip to make it lighter, or export anyway.'], ok: 'Export anyway' });
       if (!ok || editor !== E) return;
     }
-    const c = E.crop || crop.full(E.clip.w, E.clip.h);
-    const { w, h } = crop.outputSize(c, E.out.width || E.clip.w);
-    const dCs = CORE.delayCs(E.out.fps, E.out.speed);
-    const opts = { width: w, height: h, loop: E.out.loop, dither: E.out.dither, palette: E.out.palette };
-    const job = E.job = { worker: forceInline ? makeInlineWorker() : makeWorker(), cancelled: false, inFlight: 0, done: 0, total: seq.length, t0: performance.now(), opts, w, h, dCs, count: seq.length };
-    if (E.result) { URL.revokeObjectURL(E.result.url); E.result = null; E.resImg.removeAttribute('src'); }
+    clearResults(E);
+    const job = E.job = { cancelled: false, worker: null, encoder: null, t0: performance.now(), total: 1, label: '' };
     setView('exp');
     progress(0, 'preparing');
-    const canvas = new OffscreenCanvas(w, h), g = canvas.getContext('2d', { willReadFrequently: true, alpha: false });
-    g.imageSmoothingQuality = 'high';
-    const rgbaOf = async (i) => {
-      const f = E.clip.frames[i];
-      const b = await createImageBitmap(f.blob);
-      const k = b.width / E.clip.w;
-      g.drawImage(b, c.x * k, c.y * k, c.w * k, c.h * k, 0, 0, w, h);
-      b.close();
-      return g.getImageData(0, 0, w, h).data.buffer;
+    const results = {};
+    try {
+      for (const f of fmts) {
+        results[f] = f === 'gif' ? await exportGif(E, job) : await exportWebm(E, job);
+        if (job.cancelled || editor !== E) { for (const k in results) if (results[k]) URL.revokeObjectURL(results[k].url); return; }
+      }
+      E.job = null;
+      E.result = results;
+      showResult();
+    } catch (err) {
+      for (const k in results) if (results[k]) URL.revokeObjectURL(results[k].url);
+      if (job.cancelled || editor !== E) return;
+      E.job = null;
+      S.lastErr = String(err && err.message || err);
+      setView('edit');
+      modal({ title: 'Export failed', body: ['The file could not be encoded: ' + S.lastErr, 'Try a smaller width or fps. Settings > Diagnostics copies details for a bug report.'], cancel: false });
+    }
+  }
+
+  // GIF, re-encoded at smaller sizes until it fits the size limit (max 4 tries).
+  async function exportGif(E, job) {
+    const c = E.crop || crop.full(E.clip.w, E.clip.h);
+    const limit = E.out.targetMB * 1024 * 1024;
+    let cur = { w: crop.outputSize(c, E.out.width || E.clip.w).w, fps: E.out.fps };
+    const widths = [cur.w, 640, 560, 480, 400, 360, 320, 280, 240, 200, 160].filter((w, i, a) => w <= cur.w && a.indexOf(w) === i);
+    const fpss = CHOICES.outFps.filter((f) => f <= cur.fps);
+    const cands = [];
+    for (const w of widths) for (const f of fpss) cands.push({ w, fps: f });
+    const estimate = (s) => {
+      const o = crop.outputSize(c, s.w);
+      return outSeq(s.fps).length * o.w * o.h * (CFG.bytesPerPixel[E.out.dither] || 0.45);
     };
+    if (limit && estimate(cur) > limit) cur = CORE.pickSize(cands, cur, estimate(cur), limit) || cur;
+    let res = null;
+    for (let attempt = 1; ; attempt++) {
+      if (res) URL.revokeObjectURL(res.url);
+      res = await encodeGifOnce(E, job, cur, limit ? attempt : 0);
+      if (!res || job.cancelled) return null;
+      if (!limit || res.bytes <= limit || attempt >= 4) break;
+      const next = CORE.pickSize(cands, cur, res.bytes, limit);
+      if (!next) break;
+      console.log(TAG, `GIF ${fmtBytes(res.bytes)} over ${E.out.targetMB} MB at ${cur.w}px/${cur.fps}fps, retrying at ${next.w}px/${next.fps}fps`);
+      cur = next;
+    }
+    res.limit = limit; res.fits = !limit || res.bytes <= limit;
+    return res;
+  }
+
+  async function encodeGifOnce(E, job, cur, attempt, forceInline) {
+    const c = E.crop || crop.full(E.clip.w, E.clip.h);
+    const { w, h } = crop.outputSize(c, cur.w);
+    const seq = outSeq(cur.fps);
+    const dCs = CORE.delayCs(cur.fps, E.out.speed);
+    const opts = { width: w, height: h, loop: E.out.loop, dither: E.out.dither, palette: E.out.palette };
+    const worker = job.worker = forceInline ? makeInlineWorker() : makeWorker();
+    job.total = seq.length; job.done = 0; job.inFlight = 0;
+    job.label = 'GIF · ' + w + ' x ' + h + ' · ' + cur.fps + ' fps' + (attempt > 1 ? ' · try ' + attempt : '') + (worker.kind === 'inline' ? ' (main thread)' : '');
+    progress(0, 'encoding');
+    const t0 = performance.now();
+    const prep = makePrep(E, w, h);
+    const rgbaOf = async (i) => { await prep.draw(i); return prep.g.getImageData(0, 0, w, h).data.buffer; };
     let wake = null;
     const finished = new Promise((resolve, reject) => {
-      job.worker.onmessage = (e) => {
+      worker.onmessage = (e) => {
         const m = e.data;
         if (m.type === 'progress') { job.inFlight--; job.done = m.done; progress(m.done, 'encoding'); if (wake) { const f = wake; wake = null; f(); } }
         else if (m.type === 'done') resolve(m.bytes);
         else if (m.type === 'error') reject(new Error(m.message));
       };
-      job.worker.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); reject(new Error('worker failed' + (ev && ev.message ? ': ' + ev.message : ''))); };
+      worker.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); reject(new Error('worker failed' + (ev && ev.message ? ': ' + ev.message : ''))); };
     });
     finished.catch(() => {});
     try {
-      job.worker.postMessage({ type: 'init', opts, total: seq.length });
+      worker.postMessage({ type: 'init', opts, total: seq.length });
       if (opts.palette === 'global') {
-        const picks = CORE.evenlySpaced(seq.length, CFG.paletteSampleFrames);
-        for (const p of picks) {
-          if (job.cancelled) return;
+        for (const p of CORE.evenlySpaced(seq.length, CFG.paletteSampleFrames)) {
+          if (job.cancelled) return null;
           const buf = await rgbaOf(seq[p]);
-          job.worker.postMessage({ type: 'sample', buf, w, h }, [buf]);
+          worker.postMessage({ type: 'sample', buf, w, h }, [buf]);
         }
       }
       for (let k = 0; k < seq.length; k++) {
-        if (job.cancelled) return;
+        if (job.cancelled) return null;
         while (job.inFlight >= 3 && !job.cancelled) await Promise.race([new Promise((r) => { wake = r; }), finished.then(() => {}, () => {})]);
-        if (job.cancelled) return;
+        if (job.cancelled) return null;
         const buf = await rgbaOf(seq[k]);
         job.inFlight++;
-        job.worker.postMessage({ type: 'frame', buf, delayCs: dCs }, [buf]);
-        if (job.done === 0 && k === 0) progress(0, 'encoding');
+        worker.postMessage({ type: 'frame', buf, delayCs: dCs }, [buf]);
       }
-      job.worker.postMessage({ type: 'finish' });
+      worker.postMessage({ type: 'finish' });
       const bytes = await finished;
-      if (job.cancelled || editor !== E) return;
-      job.worker.terminate();
-      E.job = null;
+      worker.terminate();
+      if (job.cancelled) return null;
       const blob = new Blob([bytes], { type: 'image/gif' });
-      const url = URL.createObjectURL(blob);
-      const secs = (performance.now() - job.t0) / 1000;
-      E.result = { blob, url, bytes: blob.size, frames: seq.length, w, h, eff: 100 / dCs, len: seq.length * dCs * 10, palette: opts.palette, name: CORE.fileName(settings.filePattern, E.clip.channel, E.clip.startedAt), encoder: job.worker.kind, secs };
-      console.log(TAG, `exported ${seq.length} frames ${w}x${h} -> ${fmtBytes(blob.size)} in ${secs.toFixed(1)} s (${job.worker.kind})`);
-      showResult();
+      const secs = (performance.now() - t0) / 1000;
+      console.log(TAG, `exported GIF ${seq.length} frames ${w}x${h} -> ${fmtBytes(blob.size)} in ${secs.toFixed(1)} s (${worker.kind})`);
+      return { kind: 'gif', blob, url: URL.createObjectURL(blob), bytes: blob.size, frames: seq.length, w, h, eff: 100 / dCs, len: seq.length * dCs * 10,
+        palette: opts.palette, name: CORE.fileName(settings.filePattern, E.clip.channel, E.clip.startedAt, 'gif'), encoder: worker.kind, secs };
     } catch (err) {
-      if (job.cancelled || editor !== E) return;
-      job.worker.terminate();
-      E.job = null;
-      if (job.worker.kind === 'worker' && job.done === 0) {
+      worker.terminate();
+      if (job.cancelled) return null;
+      if (worker.kind === 'worker' && job.done === 0) {
         // The Worker never produced anything (blocked or crashed): run the same code inline.
         workerBroken = true; S.lastErr = String(err && err.message);
         console.warn(TAG, 'worker failed, encoding on the main thread instead', err);
-        startExport(true);
-        return;
+        return encodeGifOnce(E, job, cur, attempt, true);
       }
-      S.lastErr = String(err && err.message);
-      setView('edit');
-      modal({ title: 'Export failed', body: ['The GIF could not be encoded: ' + S.lastErr, 'Try a smaller width or fps. Settings > Diagnostics copies details for a bug report.'], cancel: false });
+      throw err;
     }
   }
+
+  // WebM via WebCodecs (VP9, else VP8) and our own muxer. With a size limit
+  // the bitrate comes from the limit, with one lower-bitrate retry if needed.
+  async function exportWebm(E, job) {
+    const c = E.crop || crop.full(E.clip.w, E.clip.h);
+    const { w, h } = crop.outputSize(c, E.out.width || E.clip.w);
+    const fps = E.out.fps, rate = fps * E.out.speed;
+    const seq = outSeq(fps);
+    const frameUs = 1e6 / rate, secs = seq.length / rate;
+    const limit = E.out.targetMB * 1024 * 1024;
+    // With a limit, use what the limit allows but no more than 2x the normal
+    // quality rate: past that the picture does not improve, the file just grows.
+    let bitrate = limit ? Math.max(100e3, Math.min(limit * 8 * 0.9 / secs, webmBitrate(w, h, fps) * 2)) : webmBitrate(w, h, fps);
+    let codec = null;
+    for (const [cs, id] of [['vp09.00.10.08', 'V_VP9'], ['vp8', 'V_VP8']]) {
+      try {
+        const s = await VideoEncoder.isConfigSupported({ codec: cs, width: w, height: h, bitrate: Math.round(bitrate), framerate: rate });
+        if (s && s.supported) { codec = { cs, id }; break; }
+      } catch (_) {}
+    }
+    if (!codec) throw new Error('this browser cannot encode VP9 or VP8 video');
+    const prep = makePrep(E, w, h);
+    let out = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const t0 = performance.now();
+      job.total = seq.length; job.done = 0;
+      job.label = 'WebM ' + (codec.id === 'V_VP9' ? 'VP9' : 'VP8') + ' · ' + w + ' x ' + h + ' · ' + Math.round(bitrate / 1000) + ' kbps' + (attempt > 1 ? ' · try 2' : '');
+      progress(0, 'encoding');
+      const chunks = [];
+      let fail = null;
+      const enc = job.encoder = new VideoEncoder({
+        output: (chunk) => { const d = new Uint8Array(chunk.byteLength); chunk.copyTo(d); chunks.push({ data: d, tsMs: chunk.timestamp / 1000, key: chunk.type === 'key' }); },
+        error: (e) => { fail = e; },
+      });
+      enc.configure({ codec: codec.cs, width: w, height: h, bitrate: Math.round(bitrate), framerate: rate, bitrateMode: 'variable', latencyMode: 'quality' });
+      const gop = Math.max(1, Math.round(rate * 2));
+      for (let k = 0; k < seq.length; k++) {
+        if (job.cancelled || fail) break;
+        await prep.draw(seq[k]);
+        const vf = new VideoFrame(prep.canvas, { timestamp: Math.round(k * frameUs), duration: Math.round(frameUs) });
+        enc.encode(vf, { keyFrame: k % gop === 0 });
+        vf.close();
+        while (enc.encodeQueueSize > 6 && !fail) await new Promise((r) => setTimeout(r, 5));
+        job.done = k + 1; progress(k + 1, 'encoding');
+      }
+      if (job.cancelled) { try { enc.close(); } catch (_) {} return null; }
+      if (!fail) await enc.flush().catch((e) => { fail = e; });
+      try { enc.close(); } catch (_) {}
+      job.encoder = null;
+      if (fail) throw new Error('WebM encoder: ' + (fail.message || fail));
+      chunks.sort((a, b) => a.tsMs - b.tsMs);
+      const bytes = CORE.muxWebM({ width: w, height: h, codecId: codec.id, frames: chunks, durationMs: secs * 1000 });
+      const blob = new Blob([bytes], { type: 'video/webm' });
+      if (out) URL.revokeObjectURL(out.url);
+      out = { kind: 'webm', blob, url: URL.createObjectURL(blob), bytes: blob.size, frames: seq.length, w, h, eff: rate, len: secs * 1000,
+        codec: codec.id === 'V_VP9' ? 'VP9' : 'VP8', kbps: Math.round(bitrate / 1000), name: CORE.fileName(settings.filePattern, E.clip.channel, E.clip.startedAt, 'webm'),
+        secs: (performance.now() - t0) / 1000 };
+      console.log(TAG, `exported WebM ${seq.length} frames ${w}x${h} ${out.codec} ${out.kbps} kbps -> ${fmtBytes(blob.size)} in ${out.secs.toFixed(1)} s`);
+      if (!limit || blob.size <= limit) break;
+      bitrate = Math.max(80e3, bitrate * limit / blob.size * 0.85);
+    }
+    out.limit = limit; out.fits = !limit || out.bytes <= limit;
+    return out;
+  }
+
   function progress(done, phase) {
     const E = editor; if (!E || !E.job) return;
     const j = E.job;
     E.progTxt.textContent = '';
-    E.progTxt.append('Frame ', el('b', { text: String(done) }), ' / ' + j.total + ' · ' + j.w + ' x ' + j.h + ' · ' + phase + (j.worker.kind === 'inline' ? ' (main thread)' : ''));
-    E.progBar.style.width = Math.round(done / j.total * 100) + '%';
+    E.progTxt.append('Frame ', el('b', { text: String(done) }), ' / ' + j.total + ' · ' + phase, el('div', { text: j.label }));
+    E.progBar.style.width = Math.round(done / Math.max(1, j.total) * 100) + '%';
+  }
+  function stopJob(job) {
+    if (!job) return;
+    job.cancelled = true;
+    try { if (job.worker) job.worker.terminate(); } catch (_) {}
+    try { if (job.encoder && job.encoder.state !== 'closed') job.encoder.close(); } catch (_) {}
   }
   function cancelExport() {
     const E = editor; if (!E || !E.job) return;
-    E.job.cancelled = true;
-    try { E.job.worker.terminate(); } catch (_) {}
+    stopJob(E.job);
     E.job = null;
     setView('edit');
     toast('Export cancelled.', '');
   }
-  function showResult() {
-    const E = editor, r = E.result;
-    E.resImg.src = r.url;
-    E.resImg.alt = 'Exported GIF ' + r.w + ' x ' + r.h;
-    E.resKv.textContent = '';
-    const kv = [['file', fmtBytes(r.bytes)], ['size', r.w + ' x ' + r.h], ['frames', r.frames + ' @ ' + r.eff.toFixed(1) + ' fps'], ['length', fmtTime(r.len)], ['palette', r.palette === 'global' ? 'global 256' : 'per frame'], ['name', r.name]];
-    for (const [k, v] of kv) E.resKv.append(el('span', { text: k }), el('b', { text: v }));
-    setView('done');
-    E.dlBtn.focus();
+  function clearResults(E) {
+    if (E.result) for (const k in E.result) if (E.result[k]) URL.revokeObjectURL(E.result[k].url);
+    E.result = null;
+    if (E.resList) E.resList.textContent = '';
   }
-  function download() {
-    const E = editor; if (!E || !E.result) return;
-    const r = E.result;
+  function showResult() {
+    const E = editor, R = E.result;
+    E.resList.textContent = '';
+    for (const k of ['gif', 'webm']) {
+      const r = R[k]; if (!r) continue;
+      const media = k === 'gif'
+        ? el('img', { src: r.url, alt: 'Exported GIF ' + r.w + ' x ' + r.h })
+        : el('video', { src: r.url, muted: true, autoplay: true, loop: true, playsinline: true, 'aria-label': 'Exported WebM ' + r.w + ' x ' + r.h });
+      if (k === 'webm') { media.muted = true; media.play && media.play().catch(() => {}); }
+      const kv = el('div', { class: 'kgc-kv' });
+      const rows = [['file', fmtBytes(r.bytes) + (r.limit ? (r.fits ? ' (under ' + E.out.targetMB + ' MB)' : ' (still over ' + E.out.targetMB + ' MB)') : '')],
+        ['size', r.w + ' x ' + r.h], ['frames', r.frames + ' @ ' + r.eff.toFixed(1) + ' fps'], ['length', fmtTime(r.len)],
+        k === 'gif' ? ['palette', r.palette === 'global' ? 'global 256' : 'per frame'] : ['codec', r.codec + ' · ' + r.kbps + ' kbps'], ['name', r.name]];
+      for (const [a, b] of rows) kv.append(el('span', { text: a }), el('b', { text: b, style: a === 'file' && r.limit && !r.fits ? 'color:#ffb454' : null }));
+      E.resList.append(el('div', { class: 'kgc-sec', style: 'border-bottom:0;padding-bottom:0' }, [el('h4', { text: k === 'gif' ? 'GIF' : 'WebM' })]), el('div', { class: 'kgc-result' }, [media]), kv);
+      if (r.limit && !r.fits) toast((k === 'gif' ? 'GIF' : 'WebM') + ' still over ' + E.out.targetMB + ' MB', 'at the smallest size tried. Trim the clip or crop tighter.', true);
+    }
+    setView('done');
+    (R.gif ? E.dlBtn : E.dlWebmBtn).focus();
+  }
+  function download(kind) {
+    const E = editor; if (!E || !E.result || !E.result[kind]) return;
+    const r = E.result[kind];
     try {
       const a = el('a', { href: r.url, download: r.name, style: 'display:none' });
       document.body.appendChild(a); a.click(); a.remove();
@@ -1818,29 +2313,46 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   }
   function manualSave() {
     const E = editor; if (!E || !E.result) return;
-    const a = el('a', { href: E.result.url, download: E.result.name, target: '_blank', rel: 'noopener', text: E.result.name, style: 'color:#c6ff3d' });
-    modal({ title: 'Save the GIF', body: ['If the download was blocked, right-click the link below and choose "Save link as...".', a], cancel: false, ok: 'Done' });
+    const links = [];
+    for (const k of ['gif', 'webm']) {
+      const r = E.result[k]; if (!r) continue;
+      links.push(el('p', null, [el('a', { href: r.url, download: r.name, target: '_blank', rel: 'noopener', text: r.name, style: 'color:#c6ff3d' })]));
+    }
+    modal({ title: 'Save the file', body: ['If the download was blocked, right-click a link below and choose "Save link as...".'].concat(links), cancel: false, ok: 'Done' });
   }
 
-  async function askDiscard() {
+  // Closing keeps the clip in Recent clips; only Discard deletes it.
+  async function askClose() {
     const E = editor; if (!E) return;
-    if (!E.downloaded) {
-      const ok = await modal({ title: 'Discard clip?', body: ['This clip has not been downloaded. Discard it and free its memory?'], ok: 'Discard', danger: true });
+    if (!E.saved && !E.downloaded) {
+      const ok = await modal({ title: 'Close and lose this clip?', body: ['Recent clips is off (or could not save), and this clip has not been downloaded. Closing throws it away.'], ok: 'Close', danger: true });
       if (!ok) return;
     }
     closeEditor();
+    if (E.saved) toast('Clip kept', 'in Recent clips.');
   }
-  // Frees everything the clip holds: bitmaps, blobs, the result URL, the worker.
+  async function askDiscard() {
+    const E = editor; if (!E) return;
+    const ok = await modal({ title: 'Discard clip?', body: [E.saved ? 'Delete this clip, including its copy in Recent clips?' : 'Throw this clip away and free its memory?'], ok: 'Discard', danger: true });
+    if (!ok || editor !== E) return;
+    const id = E.clip.id;
+    E.discarding = true;   // do not write edits back for a clip being deleted
+    closeEditor();
+    if (id) recent.remove(id).catch(() => {});
+  }
+  // Frees everything the clip holds in memory: bitmaps, blobs, result URLs, encoders.
   function closeEditor() {
     const E = editor; if (!E) return;
     E.closed = true;
     stopPlay();
-    if (E.job) { E.job.cancelled = true; try { E.job.worker.terminate(); } catch (_) {} E.job = null; }
+    clearTimeout(editsTimer);
+    if (E.clip.id && !E.discarding) recent.saveEdits(E.clip.id, JSON.parse(JSON.stringify(snapshotEdits(E)))).catch(() => {});
+    if (E.job) { stopJob(E.job); E.job = null; }
     for (const b of E.cache.values()) { try { b.close(); } catch (_) {} }
     E.cache.clear();
     for (const b of E.thumbs) { try { b && b.close(); } catch (_) {} }
     E.thumbs.length = 0;
-    if (E.result) { URL.revokeObjectURL(E.result.url); E.result = null; }
+    clearResults(E);
     if (E.ro) E.ro.disconnect();
     E.clip.frames.length = 0;
     lastBitmap = null;
@@ -1853,6 +2365,79 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   }
 
   /* ==================================================================== *
+   * recent clips panel                                                    *
+   * ==================================================================== */
+  let recentUi = null;
+  function closeRecent() {
+    if (!recentUi) return;
+    for (const u of recentUi.urls) URL.revokeObjectURL(u);
+    hide(recentUi.root); recentUi = null;
+  }
+  function toggleRecent() { if (recentUi) closeRecent(); else openRecent(); }
+  async function openRecent() {
+    if (settingsUi) closeSettings();
+    const U = recentUi = { urls: [] };
+    const R = U.root = popover(el('div', { id: 'kgc-recent', class: 'kgc kgc-panel', role: 'dialog', 'aria-label': 'Recent clips' }));
+    shield(R);
+    const title = el('div', { class: 'kgc-title' }, [el('b', { text: 'Recent clips' }), el('span', { class: 'v', text: 'kept in this browser' }),
+      el('div', { class: 'wb' }, [el('button', { type: 'button', text: '×', title: 'Close', 'aria-label': 'Close recent clips', onclick: closeRecent })])]);
+    makeDraggable(R, title);
+    U.list = el('div', { class: 'kgc-rlist' }, [el('div', { class: 'kgc-est', text: 'Loading...', style: 'padding:12px' })]);
+    R.append(title, U.list);
+    R.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); closeRecent(); } else if (e.key === 'Tab') trapTab(e, R); });
+    show(R);
+    placeNearPill(R);
+    await renderRecent();
+  }
+  async function renderRecent() {
+    const U = recentUi; if (!U) return;
+    let items;
+    try { items = await recent.list(); } catch (e) { items = null; S.lastErr = 'Recent clips: ' + (e && e.name); }
+    if (recentUi !== U) return;
+    for (const u of U.urls) URL.revokeObjectURL(u);
+    U.urls = [];
+    U.list.textContent = '';
+    if (!items) { U.list.append(el('div', { class: 'kgc-est', style: 'padding:12px', text: 'Browser storage is blocked here, so recent clips are not available.' })); return; }
+    if (!items.length) {
+      U.list.append(el('div', { class: 'kgc-est', style: 'padding:12px', text: settings.recentKeep
+        ? 'No recent clips yet. Every clip you record is kept here (last ' + settings.recentKeep + ') until you discard it, so a reload never loses one.'
+        : 'Recent clips is off. Turn it on in settings to keep your last clips across reloads.' }));
+      return;
+    }
+    for (const m of items) {
+      const url = URL.createObjectURL(m.thumb); U.urls.push(url);
+      const d = new Date(m.startedAt);
+      const when = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      const open = btn('Open', 'acc', 'Open this clip in the editor (with your last trim, crop and caption)', () => openRecentClip(m.id), 'Open clip from ' + m.channel + ' ' + when);
+      const del = btn('Delete', 'warn', 'Delete this clip from Recent clips', async () => {
+        const ok = await modal({ title: 'Delete clip?', body: ['Delete the ' + fmtTime(m.durMs) + ' clip from ' + m.channel + ' (' + when + ')?'], ok: 'Delete', danger: true });
+        if (!ok) return;
+        await recent.remove(m.id).catch(() => {});
+        renderRecent();
+      }, 'Delete clip from ' + m.channel + ' ' + when);
+      U.list.append(el('div', { class: 'kgc-ritem' }, [
+        el('img', { src: url, alt: '' }),
+        el('div', { class: 'kgc-rmeta' }, [el('b', { text: m.channel }), el('span', { text: when + ' · ' + fmtTime(m.durMs) + ' · ' + fmtBytes(m.bytes) + (m.edits && m.edits.cap && (m.edits.cap.top || m.edits.cap.bottom) ? ' · captioned' : '') })]),
+        el('div', { class: 'kgc-ract' }, [open, del]),
+      ]));
+    }
+    placeNearPill(U.root);   // the list changed height; keep it above the pill
+  }
+  async function openRecentClip(id) {
+    try {
+      const [rec, meta] = await Promise.all([recent.load(id), recent.getMeta(id)]);
+      if (!rec || !rec.frames || rec.frames.length < 2) { toast('That clip is gone', 'from storage.', true); renderRecent(); return; }
+      const clip = { id, frames: rec.frames, fps: rec.fps, channel: rec.channel, startedAt: new Date(rec.startedAt), dropped: rec.dropped || 0 };
+      openEditor(clip, meta && meta.edits);
+    } catch (e) { toast('Could not open the clip.', String(e && (e.message || e.name)), true); }
+  }
+  function placeNearPill(R) {
+    const pr = pill.root.getBoundingClientRect(), r = R.getBoundingClientRect();
+    R.style.left = clampN(pr.right - r.width, 8, innerWidth - r.width - 8) + 'px';
+    R.style.top = clampN(pr.top - r.height - 8, 8, Math.max(8, innerHeight - r.height - 8)) + 'px';
+  }
+
+  /* ==================================================================== *
    * settings                                                              *
    * ==================================================================== */
   let settingsUi = null;
@@ -1862,6 +2447,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   function stopListening() { if (listening) { listening.btn.classList.remove('listen'); listening.btn.textContent = hkLabel(settings.hotkeys[listening.key]); listening = null; } }
 
   function openSettings() {
+    closeRecent();
     const U = settingsUi = {};
     const R = U.root = popover(el('div', { id: 'kgc-settings', class: 'kgc kgc-panel', role: 'dialog', 'aria-label': 'GIF Clipper settings' }));
     shield(R);
@@ -1893,6 +2479,19 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     const oD = select(CHOICES.dither.map((d) => [d, LABELS.dither[d]]), settings.dither, 'Default dither', 'Starting dither in the editor. Ordered is the safe default for video.', (v) => set('dither', v));
     const oP = select(CHOICES.palette.map((p) => [p, LABELS.palette[p]]), settings.palette, 'Default palette', 'Starting palette mode. Global is smaller and does not flicker.', (v) => set('palette', v));
     const oL = select(CHOICES.loop.map((l) => [l, LABELS.loop[l]]), settings.loop, 'Default loop', 'Starting GIF loop setting.', (v) => set('loop', v));
+    const oFmt = select(CHOICES.format.map((f) => [f, LABELS.format[f]]), settings.format, 'Default format', 'What Export makes. GIF plays everywhere but is big; WebM is a real video, usually 10-20x smaller with full colour; GIF + WebM makes one of each.' + (webmOk() ? '' : ' (WebM needs WebCodecs, which this browser lacks.)'), (v) => set('format', v));
+    if (!webmOk()) for (const opt of oFmt.options) opt.disabled = opt.value !== 'gif';
+    const oT = select(CHOICES.targetMB.map((m) => [m, LABELS.targetMB[m]]), settings.targetMB, 'Default size limit', 'Start every clip with a size limit, e.g. your chat app upload cap. The export shrinks the file until it fits.', (v) => set('targetMB', +v));
+    const cS = select(CHOICES.capStyle.map((s) => [s, LABELS.capStyle[s]]), settings.capStyle, 'Default caption style', 'Starting caption style in the editor.', (v) => set('capStyle', v));
+    const cZ = select(CHOICES.capSize.map((s) => [s, LABELS.capSize[s]]), settings.capSize, 'Default caption size', 'Starting caption size in the editor.', (v) => set('capSize', v));
+    const rK = select(CHOICES.recentKeep.map((k) => [k, LABELS.recentKeep[k]]), settings.recentKeep, 'Recent clips to keep', 'How many of your latest clips are kept in this browser so a reload or crash never loses one. Each clip is a few MB. Off = clips live only in the open editor.', (v) => { set('recentKeep', +v); if (+v) recent.list().then((a) => Promise.all(a.slice(+v).map((m) => recent.remove(m.id)))).catch(() => {}); });
+    const rClear = btn('Clear recent clips', 'warn', 'Delete every clip kept in Recent clips', async () => {
+      const ok = await modal({ title: 'Clear recent clips?', body: ['Delete every clip kept in Recent clips? The clip open in the editor (if any) stays open.'], ok: 'Clear', danger: true });
+      if (!ok) return;
+      await recent.clear().catch(() => {});
+      if (editor) { editor.clip.id = null; editor.saved = false; renderEditor(); }
+      toast('Recent clips cleared.', '');
+    });
     const fp = el('input', { type: 'text', value: settings.filePattern, 'aria-label': 'File name pattern', title: 'Name of the downloaded file. {channel} becomes the channel name, {date} the clip time (YYYYMMDD-HHMMSS).' });
     fp.addEventListener('change', () => { const v = fp.value.trim() || DEFAULTS.filePattern; fp.value = v; set('filePattern', v); });
     const cnt = el('input', { type: 'checkbox', checked: settings.showCounter, 'aria-label': 'Show frame counter on the launcher', title: 'Show frames and size on the launcher while recording, so you can see how big the clip is getting.' });
@@ -1918,8 +2517,13 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       el('div', { class: 'kgc-sec' }, [el('h4', null, ['Hotkeys', tip('Work anywhere on Kick, even while typing in chat, because they need Alt or Ctrl.')]),
         hkRow('record', 'Start / stop record', 'Starts or stops a recording.'), hkRow('last', 'Clip last N s', 'Turns the rewind buffer into a clip (arms it if off).'), hkRow('toggle', 'Show / hide launcher', 'Hides or shows the launcher pill.')]),
       el('div', { class: 'kgc-sec' }, [el('h4', null, ['Output defaults', tip('What the editor starts with for each new clip. You can still change them per clip.')]),
-        el('div', { class: 'kgc-out' }, [el('span', { class: 'kgc-lab', text: 'width' }), oW, el('span', { class: 'kgc-lab', text: 'fps' }), oF, el('span', { class: 'kgc-lab', text: 'dither' }), oD,
-          el('span', { class: 'kgc-lab', text: 'palette' }), oP, el('span', { class: 'kgc-lab', text: 'loop' }), oL, el('span', { class: 'kgc-lab', text: 'file' }), fp])]),
+        el('div', { class: 'kgc-out' }, [el('span', { class: 'kgc-lab', text: 'format' }), oFmt, el('span', { class: 'kgc-lab', text: 'limit' }), oT,
+          el('span', { class: 'kgc-lab', text: 'width' }), oW, el('span', { class: 'kgc-lab', text: 'fps' }), oF, el('span', { class: 'kgc-lab', text: 'dither' }), oD,
+          el('span', { class: 'kgc-lab', text: 'palette' }), oP, el('span', { class: 'kgc-lab', text: 'loop' }), oL, el('span', { class: 'kgc-lab', text: 'file' }), fp,
+          el('span', { class: 'kgc-lab', text: 'caption' }), cS, el('span', { class: 'kgc-lab', text: 'size' }), cZ])]),
+      el('div', { class: 'kgc-sec' }, [el('h4', null, ['Recent clips', tip('Your latest clips are kept in this browser (kick.com site storage) so a reload never loses one. Clearing site data for kick.com also clears them.')]),
+        el('div', { class: 'kgc-out' }, [el('span', { class: 'kgc-lab', text: 'keep' }), rK]),
+        el('div', { class: 'kgc-row', style: 'margin-top:6px' }, [rClear])]),
       el('div', { class: 'kgc-sec' }, [el('label', { class: 'kgc-row', style: 'cursor:pointer', title: cnt.title }, [cnt, el('span', { text: 'Show frame counter on the launcher' })])]),
       el('div', { class: 'kgc-sec' }, [el('div', { class: 'kgc-row' }, [
         btn('Backup', '', 'Download your settings as a JSON file', backupSettings, 'Backup settings'),
@@ -1970,7 +2574,8 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       'last recording: ' + (a ? a.frames + ' frames in ' + a.secs.toFixed(1) + ' s = ' + a.fps.toFixed(1) + ' fps, ' + a.dropped + ' dropped ticks' : 'none'),
       'avg capture tick: ' + (S.avgTick ? S.avgTick.toFixed(1) + ' ms' : '-') + ', avg frame: ' + (S.avgBlob ? fmtBytes(Math.round(S.avgBlob)) : '-'),
       'rewind buffer: ' + (armed() ? 'armed, ' + S.ring.length + ' frames' : 'off') + ', rVFC callbacks: ' + S.rvfc,
-      'encoder: ' + (workerBroken ? 'main-thread fallback' : 'worker'),
+      'encoder: ' + (workerBroken ? 'main-thread fallback' : 'worker') + ', WebM (WebCodecs): ' + (webmOk() ? 'yes' : 'no') + ', default format: ' + settings.format,
+      'recent clips: keep ' + settings.recentKeep + ', IndexedDB ' + (typeof indexedDB === 'undefined' ? 'missing' : 'present'),
       'last error: ' + (S.lastErr || 'none'),
       'browser: ' + navigator.userAgent,
     ].join('\n');
