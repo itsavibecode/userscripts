@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.2.0
+// @version      0.2.1
 // @description  Turn a moment of a live Kick stream into a GIF (or WebM) without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -10,10 +10,10 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @noframes
-// @homepageURL  https://github.com/itsavibecode/userscripts/tree/main/kick-gif-clipper
-// @supportURL   https://github.com/itsavibecode/userscripts/issues
-// @updateURL    https://raw.githubusercontent.com/itsavibecode/userscripts/main/kick-gif-clipper/kick-gif-clipper.user.js
-// @downloadURL  https://raw.githubusercontent.com/itsavibecode/userscripts/main/kick-gif-clipper/kick-gif-clipper.user.js
+// @homepageURL  https://bookhockeys.com/gifclipper/
+// @supportURL   https://bookhockeys.com/gifclipper/
+// @updateURL    https://bookhockeys.com/gifclipper/kick-gif-clipper.user.js
+// @downloadURL  https://bookhockeys.com/gifclipper/kick-gif-clipper.user.js
 // ==/UserScript==
 
 /*
@@ -44,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick

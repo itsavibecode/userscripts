@@ -51,14 +51,17 @@ without asking.
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
-2. Open
-   [`kick-gif-clipper.user.js`](https://raw.githubusercontent.com/itsavibecode/userscripts/main/kick-gif-clipper/kick-gif-clipper.user.js)
-   (the raw link). Tampermonkey shows an install prompt.
-3. Open a live channel. The console logs `[GIF Clipper] v0.2.0 active` and the
+2. Go to **[bookhockeys.com/gifclipper](https://bookhockeys.com/gifclipper/)**
+   and click **Install GIF Clipper**. Tampermonkey shows an install prompt.
+   (Direct link: <https://bookhockeys.com/gifclipper/kick-gif-clipper.user.js>.)
+3. Open a live channel. The console logs `[GIF Clipper] v0.2.1 active` and the
    pill appears on the player.
 
-The raw link is cached by GitHub for about 5 minutes. To test a version you just
-pushed, use the raw URL with the commit SHA instead of `main`.
+Installs and updates come from the bookhockeys.com copy. This file is the
+source; each release copies it byte-for-byte to `book/gifclipper/` in the
+bookhockeys.com site repo (the header's `@updateURL` points there). GitHub
+Pages caches for about 10 minutes, so a just-pushed version can take a few
+minutes to show up.
 
 ## Using it
 
@@ -163,6 +166,12 @@ a WebM round trip (the file is parsed back: track, size, clusters, keyframes,
 timestamps).
 
 ## Changelog
+
+### 0.2.1
+- GIF Clipper now has a home page at
+  [bookhockeys.com/gifclipper](https://bookhockeys.com/gifclipper/) with an
+  install button, and installs and updates come from there. Copies installed
+  from the old GitHub link switch over by themselves with this update.
 
 ### 0.2.0
 - **WebM export**, as an option: GIF stays the default, and settings (or the
