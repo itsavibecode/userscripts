@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.0
+// @version      0.4.1
 // @description  Turn a moment of a live Kick stream into a GIF (or WebM), or save the current frame as a PNG in one click, without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -44,14 +44,15 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick
   // player change is a one-place fix.
   const CFG = {
     minVideoArea: 160 * 90,   // ignore tiny / 0x0 videos (Kick keeps a hidden static one that taints the canvas)
-    uptimeSel: '.tabular-nums.font-bold',   // Kick's live uptime counter in the player bar
+    seekSel: '[role="slider"][aria-label="Current video time"]',   // Kick's seek bar (ms; live streams are rewindable)
+    uptimeSel: '.tabular-nums.font-bold',   // Kick's live uptime counter in the player bar (fallback)
     webpQuality: 0.82,
     maxEditorFrames: 600,     // warn before exporting more than this
     sizeWarnBytes: 10 * 1024 * 1024,
@@ -543,10 +544,10 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       return p[0] * 60 + p[1];                                                     // m:ss
     }
     // {kind:'vod'|'live', pos, dur} -> what goes on the image and in the file name.
+    // "5:00:03 / 8:00:02" = where you are / how long the VOD or stream is.
     function timeLabel(t) {
       if (!t || !(t.pos >= 0)) return '';
-      if (t.kind === 'vod') return fmtHMS(t.pos) + (t.dur > 0 ? ' / ' + fmtHMS(t.dur) : '');
-      return 'LIVE ' + fmtHMS(t.pos);
+      return fmtHMS(t.pos) + (t.dur > 0 ? ' / ' + fmtHMS(Math.max(t.dur, t.pos)) : '');
     }
     function timeTag(t) {
       if (!t || !(t.pos >= 0)) return '';
@@ -1119,6 +1120,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     const v = findVideo();
     if (!v) { toast('No player.', 'Open a live channel (and pass any 18+ gate) first.', true); return; }
     S.video = v; resetFps();
+    freshLiveTime(v);   // so clips from the buffer know their stream time
     S.ring = []; S.ringCap = S.fps * settings.bufferSeconds;
     ensureSampler(); renderPill();
   }
@@ -1135,6 +1137,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     S.lastCT = -1;
     S.rec = { frames: [], t0: performance.now(), startedAt: new Date(), channel: channelName(), path: location.pathname, fps: S.fps, dropped: 0, bytes: 0 };
     ensureSampler(); renderPill();
+    freshLiveTime(v);   // so the clip knows its stream time
     pill.timer = setInterval(renderPillLive, 200);
   }
   // Save a Blob straight to the downloads folder: an anchor with `download`
@@ -1156,12 +1159,51 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     }
     return null;
   }
+  // Live streams can be rewound: Kick's seek bar holds where you are watching and
+  // how long the stream has run (ms). Kick removes its control bar from the page
+  // whenever the controls auto-hide, so we (1) remember the last reading and
+  // advance it with the video clock, and (2) can briefly wake the controls.
+  function readLiveBar() {
+    const bar = document.querySelector(CFG.seekSel);
+    if (bar) {
+      const now = Number(bar.getAttribute('aria-valuenow')), max = Number(bar.getAttribute('aria-valuemax'));
+      if (max > 0 && now >= 0 && now <= max) return { pos: now / 1000, dur: max / 1000 };
+    }
+    const up = readUptime();
+    return up == null ? null : { pos: up, dur: 0 };
+  }
+  const liveRef = { v: null, path: '', pos: 0, dur: 0, vt: 0, at: 0 };
+  function noteLiveTime() {
+    if (/\/videos\//.test(location.pathname)) return false;
+    const v = findVideo(), r = v && readLiveBar();
+    if (!r) return false;
+    Object.assign(liveRef, { v, path: location.pathname, pos: r.pos, dur: r.dur, vt: v.currentTime, at: performance.now() });
+    return true;
+  }
+  setInterval(noteLiveTime, 1000);
+  // Synthetic hover over the video: Kick re-renders its controls (and the bar).
+  function wakeControls(v) {
+    if (!v) return;
+    const r = v.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+    for (const t of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointermove', 'mousemove']) {
+      try { v.dispatchEvent(new (t.indexOf('pointer') === 0 ? PointerEvent : MouseEvent)(t, { bubbles: true, clientX: x, clientY: y, pointerType: 'mouse' })); } catch (_) {}
+    }
+  }
+  async function freshLiveTime(v) {
+    if (/\/videos\//.test(location.pathname)) return;
+    wakeControls(v);
+    await sleep(150);
+    noteLiveTime();
+  }
   function streamTime(v) {
     v = v || findVideo();
     if (!v) return null;
     if (/\/videos\//.test(location.pathname) && isFinite(v.duration) && v.duration > 0) return { kind: 'vod', pos: v.currentTime, dur: v.duration, vt: v.currentTime };
-    const up = readUptime();
-    return up == null ? null : { kind: 'live', pos: up, vt: v.currentTime };
+    noteLiveTime();
+    if (liveRef.v !== v || liveRef.path !== location.pathname || !liveRef.at) return null;
+    const pos = liveRef.pos + Math.max(0, v.currentTime - liveRef.vt);
+    const dur = liveRef.dur ? Math.max(pos, liveRef.dur + (performance.now() - liveRef.at) / 1000) : 0;
+    return { kind: 'live', pos, dur, vt: v.currentTime };
   }
   // A clip remembers how its frames' video clock maps to stream time, so every
   // frame (even reopened from Recent clips) knows its own VOD position / uptime.
@@ -1203,6 +1245,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     if (!v || !v.videoWidth) { toast('No player on this page.', 'Open a live channel (and pass any 18+ gate) first.', true); return; }
     snapBusy = true;
     try {
+      await freshLiveTime(v);                 // Kick hides its time bar when the mouse is away
       const st = streamTime(v);              // read before drawing so they match
       const w = v.videoWidth, h = v.videoHeight;
       const c = new OffscreenCanvas(w, h);
@@ -2639,7 +2682,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     fp.addEventListener('change', () => { const v = fp.value.trim() || DEFAULTS.filePattern; fp.value = v; set('filePattern', v); });
     const cnt = el('input', { type: 'checkbox', checked: settings.showCounter, 'aria-label': 'Show frame counter on the launcher', title: 'Show frames and size on the launcher while recording, so you can see how big the clip is getting.' });
     cnt.addEventListener('change', () => set('showCounter', cnt.checked));
-    const stampChk = el('input', { type: 'checkbox', checked: settings.pngStamp, 'aria-label': 'Stamp the stream time on PNG snapshots', title: 'Draws the VOD position (5:00:03 / 8:00:02) or the live uptime (LIVE 5:00:03) in the corner of PNG snapshots, so you know where the frame came from. The time is always in the file name either way.' });
+    const stampChk = el('input', { type: 'checkbox', checked: settings.pngStamp, 'aria-label': 'Stamp the stream time on PNG snapshots', title: 'Draws where you are / how long the VOD or stream is (5:00:03 / 8:00:02) in the corner of PNG snapshots, so you know where the frame came from. The time is always in the file name either way.' });
     stampChk.addEventListener('change', () => set('pngStamp', stampChk.checked));
 
     const fileIn = el('input', { type: 'file', accept: 'application/json,.json', hidden: true, 'aria-label': 'Restore settings file' });

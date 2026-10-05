@@ -23,7 +23,9 @@ test("parseHMS reads Kick's counters (m:ss, h:mm:ss, d:hh:mm:ss)", () => {
 
 test('timeLabel / timeTag for VOD and live', () => {
   assert.equal(K.timeLabel({ kind: 'vod', pos: 18003.4, dur: 28802 }), '5:00:03 / 8:00:02');
-  assert.equal(K.timeLabel({ kind: 'live', pos: 76068 }), 'LIVE 21:07:48');
+  assert.equal(K.timeLabel({ kind: 'live', pos: 18003, dur: 28802 }), '5:00:03 / 8:00:02');   // rewound live stream
+  assert.equal(K.timeLabel({ kind: 'live', pos: 76068 }), '21:07:48');                          // uptime only, no total
+  assert.equal(K.timeLabel({ kind: 'live', pos: 3304.9, dur: 3304.3 }), '0:55:04 / 0:55:04');   // at the live edge, never pos > total
   assert.equal(K.timeLabel(null), '');
   assert.equal(K.timeTag({ kind: 'vod', pos: 18003.9, dur: 28802 }), 'at-5h00m03s');
   assert.equal(K.timeTag({ kind: 'live', pos: 76068 }), 'live-21h07m48s');

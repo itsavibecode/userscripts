@@ -31,11 +31,12 @@ login, and the script makes no network requests at all.
   current video frame as a full-resolution PNG straight to your downloads, with
   no dialog. In the editor, the **PNG** button next to the timecode saves the
   frame under the playhead with your crop and caption applied.
-  Each PNG is stamped in the corner with where it came from: the VOD position
-  (`5:00:03 / 8:00:02`) on VOD pages, or the stream uptime (`LIVE 5:00:03`) on
-  live channels. The same time goes in the file name (`..._at-5h00m03s.png` /
-  `..._live-5h00m03s.png`) so snapshots sort in order. The corner stamp can be
-  turned off in settings.
+  Each PNG is stamped in the corner with where it came from, as where you are /
+  how long it is: `5:00:03 / 8:00:02`. On VODs that's the VOD position and
+  length; on live channels it's where you're watching (live streams can be
+  rewound) and how long the stream has been running. The same time goes in the
+  file name (`..._at-5h00m03s.png` / `..._live-5h00m03s.png`) so snapshots sort
+  in order. The corner stamp can be turned off in settings.
 - **Captions**: top and bottom text, in *Meme* style (bold white capitals with a
   black outline) or *Subtitle* style (text on a dark bar), small / medium /
   large. Long text wraps and shrinks to fit. The preview shows exactly what the
@@ -177,6 +178,15 @@ a WebM round trip (the file is parsed back: track, size, clusters, keyframes,
 timestamps).
 
 ## Changelog
+
+### 0.4.1
+- Live-stream snapshots now use the same `5:00:03 / 8:00:02` format as VODs:
+  where you're watching / how long the stream has run, read from Kick's seek bar
+  (live streams can be rewound), instead of `LIVE 5:00:03`.
+- Fixed the time often missing: Kick removes its time bar whenever the player
+  controls auto-hide (e.g. when your mouse is on the PNG button instead of the
+  video). The clipper now briefly wakes the controls before a snapshot, and keeps
+  the last reading running on the video's clock, so the time is there either way.
 
 ### 0.4.0
 - **PNG snapshots now show where they came from.** On a VOD the corner reads
