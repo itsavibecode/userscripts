@@ -27,6 +27,10 @@ login, and the script makes no network requests at all.
   of the middle), a crop box with 8 handles and aspect presets (Free, 16:9, 1:1,
   4:5, 9:16), and output settings (width, fps, speed, loop, palette, dither)
   with a live size estimate that turns amber over 10 MB.
+- **PNG snapshot**: the **PNG** button on the pill (or `Alt+Shift+S`) saves the
+  current video frame as a full-resolution PNG straight to your downloads, with
+  no dialog. In the editor, the **PNG** button next to the timecode saves the
+  frame under the playhead with your crop and caption applied.
 - **Captions**: top and bottom text, in *Meme* style (bold white capitals with a
   black outline) or *Subtitle* style (text on a dark bar), small / medium /
   large. Long text wraps and shrinks to fit. The preview shows exactly what the
@@ -69,6 +73,7 @@ minutes to show up.
 | --- | --- |
 | Record | **Record**, then **Stop** (or `Alt+Shift+R` twice) |
 | Clip what just happened | Arm the buffer once (click **Last 15 s**), then **Last 15 s** or `Alt+Shift+L` |
+| Save the current frame as a PNG | **PNG** on the pill, or `Alt+Shift+S` |
 | Show / hide the pill | `Alt+Shift+G` (or the Tampermonkey menu) |
 | Play / pause the preview | `Space`, or click the preview |
 | Step one frame | `Left` / `Right` (`Shift` = one second) |
@@ -166,6 +171,15 @@ a WebM round trip (the file is parsed back: track, size, clusters, keyframes,
 timestamps).
 
 ## Changelog
+
+### 0.3.0
+- **Save a frame as a PNG in one click.** A **PNG** button on the pill and an
+  `Alt+Shift+S` hotkey save the current video frame at the stream's full
+  resolution straight to your downloads, with no prompt, for when you want a
+  still instead of a clip. The editor gets its own **PNG** button that saves the
+  frame under the playhead with the crop and caption.
+- Fixed hidden controls showing up on pages without Kick's stylesheet (the
+  script now hides them itself instead of relying on Kick's CSS).
 
 ### 0.2.1
 - GIF Clipper now has a home page at

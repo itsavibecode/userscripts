@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.2.1
-// @description  Turn a moment of a live Kick stream into a GIF (or WebM) without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
+// @version      0.3.0
+// @description  Turn a moment of a live Kick stream into a GIF (or WebM), or save the current frame as a PNG in one click, without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
 // @run-at       document-idle
@@ -44,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.2.1';
+  const VERSION = '0.3.0';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick
@@ -548,7 +548,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
         .split('{channel}').join(channel || 'kick')
         .split('{date}').join(stamp(date));
       n = n.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').trim() || 'kick_clip';
-      n = n.replace(/\.(gif|webm)$/i, '');
+      n = n.replace(/\.(gif|webm|png)$/i, '');
       return n + '.' + ext;
     }
     // Thin a frame list to a lower fps by timestamp (used when capture steps down).
@@ -630,7 +630,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   };
   const DEFAULTS = {
     captureFps: 15, captureWidth: 640, maxSeconds: 30, bufferSeconds: 15, armOnLoad: false,
-    hotkeys: { record: 'Alt+Shift+KeyR', last: 'Alt+Shift+KeyL', toggle: 'Alt+Shift+KeyG' },
+    hotkeys: { record: 'Alt+Shift+KeyR', last: 'Alt+Shift+KeyL', snap: 'Alt+Shift+KeyS', toggle: 'Alt+Shift+KeyG' },
     outWidth: 480, outFps: 15, speed: 1, loop: 'forever', palette: 'global', dither: 'ordered',
     format: 'gif', targetMB: 0, recentKeep: 5, capStyle: 'meme', capSize: 'm',
     filePattern: 'kick_{channel}_{date}.gif', showCounter: true,
@@ -719,6 +719,9 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--text);
     letter-spacing:normal;text-transform:none;text-align:left}
   .kgc *,.kgc *::before,.kgc *::after{box-sizing:border-box;font-family:inherit;letter-spacing:normal}
+  /* Our display rules (inline-flex buttons etc.) would otherwise beat the
+     hidden attribute; Kick's own CSS happened to cover for this. */
+  .kgc [hidden]{display:none!important}
   .kgc[popover]{margin:0;padding:0;border:0;background:transparent;overflow:visible;inset:auto;color:var(--text)}
   .kgc[popover]::backdrop{background:transparent}
   .kgc button{font:inherit;font-size:12px;cursor:pointer;color:inherit;background:none;border:0;margin:0;line-height:1}
@@ -789,6 +792,8 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   .kgc-preview canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
   .kgc-transport{display:flex;align-items:center;gap:8px;min-height:34px;margin-top:8px;flex-wrap:wrap}
   .kgc-transport .tb{width:28px;height:28px;border-radius:var(--rs);background:var(--raised);border:1px solid var(--border);font-size:11px}
+  .kgc-transport .tb.png{width:auto;padding:0 8px;font-weight:700;font-size:10px}
+  .kgc-btn.flash{background:var(--accent)!important;border-color:var(--accent)!important;color:var(--ink)}
   .kgc-transport .tb.play{background:var(--accent);border-color:var(--accent);color:var(--ink);font-weight:800}
   .kgc-transport .tc{font-variant-numeric:tabular-nums}
   .kgc-transport .mut{color:var(--muted)}
@@ -1102,6 +1107,36 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     ensureSampler(); renderPill();
     pill.timer = setInterval(renderPillLive, 200);
   }
+  // Save a Blob straight to the downloads folder: an anchor with `download`
+  // never opens a dialog (unless the browser itself is set to ask every time).
+  function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: name, style: 'display:none' });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+  // Current live frame at the stream's full resolution, as a PNG.
+  let snapBusy = false;
+  async function snapshot() {
+    if (snapBusy) return;
+    const v = findVideo();
+    if (!v || !v.videoWidth) { toast('No player on this page.', 'Open a live channel (and pass any 18+ gate) first.', true); return; }
+    snapBusy = true;
+    try {
+      const w = v.videoWidth, h = v.videoHeight;
+      const c = new OffscreenCanvas(w, h);
+      c.getContext('2d', { alpha: false }).drawImage(v, 0, 0, w, h);
+      const blob = await c.convertToBlob({ type: 'image/png' });
+      const name = CORE.fileName(settings.filePattern, channelName(), new Date(), 'png');
+      saveBlob(blob, name);
+      if (pill.snap) { pill.snap.classList.add('flash'); setTimeout(() => pill.snap.classList.remove('flash'), 350); }
+      toast('Saved', name + ' · ' + w + ' x ' + h + ' · ' + fmtBytes(blob.size));
+    } catch (e) {
+      S.lastErr = 'PNG: ' + ((e && (e.name + ': ' + e.message)) || e);
+      toast('Could not grab the frame.', e && e.name === 'SecurityError' ? 'This player\'s pixels are locked (cross-origin).' : String(e && e.message || e), true);
+    } finally { snapBusy = false; }
+  }
+
   function stopRecording(reason) {
     const r = S.rec;
     if (!r) return;
@@ -1175,8 +1210,9 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       el('button', { type: 'button', text: '×', title: 'Turn the rewind buffer off (frees its memory)', 'aria-label': 'Turn rewind buffer off', onclick: () => disarm() })]);
     P.gear = el('button', { class: 'kgc-btn ic', type: 'button', text: '⚙', title: 'Settings: capture fps / width, rewind buffer, hotkeys, output defaults', 'aria-label': 'Settings', onclick: () => toggleSettings() });
     P.min = el('button', { class: 'kgc-btn ic', type: 'button', text: '−', title: 'Collapse to a small GIF button (hotkeys keep working)', 'aria-label': 'Collapse launcher', onclick: () => setCollapsed(true) });
+    P.snap = el('button', { class: 'kgc-btn', type: 'button', text: 'PNG', 'aria-label': 'Save the current frame as a PNG', onclick: () => snapshot() });
     P.recent = el('button', { class: 'kgc-btn ic', type: 'button', text: '◷', title: 'Recent clips: reopen one of your last clips (kept across reloads)', 'aria-label': 'Recent clips', onclick: () => toggleRecent() });
-    P.box = el('div', { class: 'kgc-pillbox' }, [P.grip, P.none, P.rec, P.tc, P.meta, P.note, P.last, P.chip, P.recent, P.gear, P.min]);
+    P.box = el('div', { class: 'kgc-pillbox' }, [P.grip, P.none, P.rec, P.tc, P.meta, P.note, P.snap, P.last, P.chip, P.recent, P.gear, P.min]);
     P.miniDot = el('i', { hidden: true });
     P.mini = el('button', { class: 'kgc-mini', type: 'button', text: 'GIF', title: 'GIF Clipper - click to expand', 'aria-label': 'Expand GIF Clipper launcher', onclick: () => setCollapsed(false) }, [P.miniDot]);
     P.root.append(P.box, P.mini);
@@ -1272,6 +1308,8 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     P.chip.hidden = !armed() || rec;
     P.gear.hidden = rec;
     P.recent.hidden = rec || !settings.recentKeep;
+    P.snap.hidden = P.state === 'none';
+    P.snap.title = 'Save the current video frame as a PNG at full resolution, straight to your downloads (' + hkLabel(settings.hotkeys.snap) + ')';
     renderPillLive();
   }
   function renderPillLive() {
@@ -1547,6 +1585,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       E.playBtn,
       el('button', { class: 'tb', type: 'button', text: '>|', title: 'Go to the last kept frame', 'aria-label': 'Last kept frame', onclick: () => { stopPlay(); setPlay(lastKept()); } }),
       E.tcCur, E.tcTot,
+      el('button', { class: 'tb png', type: 'button', text: 'PNG', title: 'Save the frame under the playhead as a PNG (with the crop and caption), straight to your downloads', 'aria-label': 'Save this frame as a PNG', onclick: () => saveEditorFrame() }),
       el('label', { title: 'Loop the preview playback (does not change the GIF loop setting)' }, ['Loop', E.loopChk]),
     ]);
     // timeline
@@ -2063,6 +2102,24 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     };
   }
 
+  // The frame under the playhead as a PNG: crop and caption applied, at the
+  // captured resolution (no output-width downscale).
+  async function saveEditorFrame() {
+    const E = editor; if (!E) return;
+    stopPlay();
+    try {
+      const c = E.crop || crop.full(E.clip.w, E.clip.h);
+      const { w, h } = crop.outputSize(c, c.w);
+      const prep = makePrep(E, w, h);
+      await prep.draw(E.play);
+      const blob = await prep.canvas.convertToBlob({ type: 'image/png' });
+      const when = new Date(+E.clip.startedAt + E.play * 1000 / E.clip.fps);
+      const name = CORE.fileName(settings.filePattern, E.clip.channel, when, 'png');
+      saveBlob(blob, name);
+      toast('Saved', name + ' · ' + w + ' x ' + h + ' · ' + fmtBytes(blob.size));
+    } catch (e) { toast('Could not save the frame.', String(e && e.message || e), true); }
+  }
+
   async function startExport() {
     const E = editor; if (!E || E.job) return;
     stopPlay();
@@ -2515,7 +2572,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
         el('div', { class: 'kgc-row' }, [el('span', { class: 'kgc-lab', text: 'keep' }), bufS, el('label', { class: 'kgc-lab', style: 'display:flex;gap:6px;align-items:center;cursor:pointer', title: armChk.title }, [armChk, 'arm on load'])]),
         el('div', { class: 'kgc-row' }, [U.armBtn]), U.cost]),
       el('div', { class: 'kgc-sec' }, [el('h4', null, ['Hotkeys', tip('Work anywhere on Kick, even while typing in chat, because they need Alt or Ctrl.')]),
-        hkRow('record', 'Start / stop record', 'Starts or stops a recording.'), hkRow('last', 'Clip last N s', 'Turns the rewind buffer into a clip (arms it if off).'), hkRow('toggle', 'Show / hide launcher', 'Hides or shows the launcher pill.')]),
+        hkRow('record', 'Start / stop record', 'Starts or stops a recording.'), hkRow('last', 'Clip last N s', 'Turns the rewind buffer into a clip (arms it if off).'), hkRow('snap', 'Save frame as PNG', 'Saves the current video frame as a PNG straight to your downloads.'), hkRow('toggle', 'Show / hide launcher', 'Hides or shows the launcher pill.')]),
       el('div', { class: 'kgc-sec' }, [el('h4', null, ['Output defaults', tip('What the editor starts with for each new clip. You can still change them per clip.')]),
         el('div', { class: 'kgc-out' }, [el('span', { class: 'kgc-lab', text: 'format' }), oFmt, el('span', { class: 'kgc-lab', text: 'limit' }), oT,
           el('span', { class: 'kgc-lab', text: 'width' }), oW, el('span', { class: 'kgc-lab', text: 'fps' }), oF, el('span', { class: 'kgc-lab', text: 'dither' }), oD,
@@ -2615,6 +2672,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     let fn = null;
     if (combo === hk.record) fn = () => { if (!recording() && !findVideo()) { toast('No player on this page.', '', true); return; } toggleRecord(); };
     else if (combo === hk.last) fn = clipLast;
+    else if (combo === hk.snap) fn = snapshot;
     else if (combo === hk.toggle) fn = () => setHidden(!ui.hidden);
     if (!fn) return;
     e.preventDefault(); e.stopPropagation();

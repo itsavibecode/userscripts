@@ -116,4 +116,5 @@ test('fileName swaps the extension for WebM', () => {
   assert.equal(K.fileName('kick_{channel}_{date}.gif', 'deen', d, 'webm'), 'kick_deen_20261002-141233.webm');
   assert.equal(K.fileName('kick_{channel}_{date}.gif', 'deen', d), 'kick_deen_20261002-141233.gif');
   assert.equal(K.fileName('clip_{channel}', 'deen', d, 'webm'), 'clip_deen.webm');
+  assert.equal(K.fileName('kick_{channel}_{date}.gif', 'deen', d, 'png'), 'kick_deen_20261002-141233.png');  // frame snapshots
 });
