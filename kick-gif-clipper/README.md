@@ -31,12 +31,13 @@ login, and the script makes no network requests at all.
   current video frame as a full-resolution PNG straight to your downloads, with
   no dialog. In the editor, the **PNG** button next to the timecode saves the
   frame under the playhead with your crop and caption applied.
-  Each PNG is stamped in the corner with where it came from, as where you are /
-  how long it is: `5:00:03 / 8:00:02`. On VODs that's the VOD position and
-  length; on live channels it's where you're watching (live streams can be
-  rewound) and how long the stream has been running. The same time goes in the
-  file name (`..._at-5h00m03s.png` / `..._live-5h00m03s.png`) so snapshots sort
-  in order. The corner stamp can be turned off in settings.
+  Each PNG gets a slim black **info bar under the picture** (the frame itself is
+  never covered): the time on top (`5:00:03 / 8:00:02` on a VOD, `1:22:15 / LIVE`
+  on a live channel), and underneath in small text the date and the stream
+  title, with `kick.com/<channel>` on the right. On a VOD the date is the day
+  that moment actually aired. The time also goes in the file name
+  (`..._at-5h00m03s.png` / `..._live-1h22m15s.png`) so snapshots sort in order.
+  The bar can be turned off in settings.
 - **Captions**: top and bottom text, in *Meme* style (bold white capitals with a
   black outline) or *Subtitle* style (text on a dark bar), small / medium /
   large. Long text wraps and shrinks to fit. The preview shows exactly what the
@@ -106,7 +107,7 @@ must include Ctrl or Alt so it never fires while you type in chat).
 | Size limit | no limit | Start every clip with a limit, e.g. your chat app's upload cap. |
 | Output defaults | 480 px, 15 fps, ordered dither, global palette, loop forever | What each new clip starts with. |
 | Caption | Meme, medium | Starting caption style and size. |
-| Stamp the stream time on PNG snapshots | on | Shows the VOD position or live uptime in the corner of each PNG. The file name has it either way. |
+| Info bar under PNG snapshots | on | Adds the time, date and stream title in a black bar under each PNG. The file name has the time either way. |
 | Recent clips | keep 5 | How many clips stay in the browser (0 = off). **Clear recent clips** deletes them all. |
 | File name | `kick_{channel}_{date}.gif` | `{channel}` and `{date}` are filled in. |
 | Frame counter on the pill | on | See how big a recording is getting. |
@@ -178,6 +179,16 @@ a WebM round trip (the file is parsed back: track, size, clusters, keyframes,
 timestamps).
 
 ## Changelog
+
+### 0.5.0
+- **PNG snapshots get an info bar instead of a corner stamp.** A slim black bar
+  under the frame (nothing covers the picture) shows the time, `5:00:03 / 8:00:02`
+  on VODs and `1:22:15 / LIVE` on live channels, plus the date and the stream
+  title in small text and `kick.com/<channel>`. So a screenshot carries where
+  and when it came from when you share it. On VODs the date is the day that
+  moment aired, worked out from the VOD's start time.
+- Clips remember their stream title (also in Recent clips), so editor PNGs get
+  the same bar.
 
 ### 0.4.1
 - Live-stream snapshots now use the same `5:00:03 / 8:00:02` format as VODs:

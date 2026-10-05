@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.4.1
+// @version      0.5.0
 // @description  Turn a moment of a live Kick stream into a GIF (or WebM), or save the current frame as a PNG in one click, without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -44,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.4.1';
+  const VERSION = '0.5.0';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick
@@ -52,6 +52,7 @@
   const CFG = {
     minVideoArea: 160 * 90,   // ignore tiny / 0x0 videos (Kick keeps a hidden static one that taints the canvas)
     seekSel: '[role="slider"][aria-label="Current video time"]',   // Kick's seek bar (ms; live streams are rewindable)
+    titleSel: '[data-testid="livestream-title"]',   // stream / VOD title under the player
     uptimeSel: '.tabular-nums.font-bold',   // Kick's live uptime counter in the player bar (fallback)
     webpQuality: 0.82,
     maxEditorFrames: 600,     // warn before exporting more than this
@@ -544,9 +545,10 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       return p[0] * 60 + p[1];                                                     // m:ss
     }
     // {kind:'vod'|'live', pos, dur} -> what goes on the image and in the file name.
-    // "5:00:03 / 8:00:02" = where you are / how long the VOD or stream is.
+    // VOD: "5:00:03 / 8:00:02" (position / length). Live: "1:22:15 / LIVE".
     function timeLabel(t) {
       if (!t || !(t.pos >= 0)) return '';
+      if (t.kind === 'live') return fmtHMS(t.pos) + ' / LIVE';
       return fmtHMS(t.pos) + (t.dur > 0 ? ' / ' + fmtHMS(Math.max(t.dur, t.pos)) : '');
     }
     function timeTag(t) {
@@ -1198,7 +1200,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   function streamTime(v) {
     v = v || findVideo();
     if (!v) return null;
-    if (/\/videos\//.test(location.pathname) && isFinite(v.duration) && v.duration > 0) return { kind: 'vod', pos: v.currentTime, dur: v.duration, vt: v.currentTime };
+    if (/\/videos\//.test(location.pathname) && isFinite(v.duration) && v.duration > 0) return { kind: 'vod', pos: v.currentTime, dur: v.duration, vt: v.currentTime, start: readVodStart() };
     noteLiveTime();
     if (liveRef.v !== v || liveRef.path !== location.pathname || !liveRef.at) return null;
     const pos = liveRef.pos + Math.max(0, v.currentTime - liveRef.vt);
@@ -1209,27 +1211,74 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   // frame (even reopened from Recent clips) knows its own VOD position / uptime.
   function clipTime0() {
     const st = streamTime(S.video && S.video.isConnected ? S.video : null);
-    return st ? { kind: st.kind, offset: st.pos - st.vt, dur: st.dur || 0 } : null;
+    return st ? { kind: st.kind, offset: st.pos - st.vt, dur: st.dur || 0, start: st.start || 0 } : null;
   }
   function frameTime(clip, i) {
     const f = clip.frames[i], z = clip.time0;
     if (!z || !f || f.vt == null) return null;
-    return { kind: z.kind, pos: f.vt + z.offset, dur: z.dur };
+    return { kind: z.kind, pos: f.vt + z.offset, dur: z.dur, start: z.start || 0 };
   }
-  // Small time badge in the bottom-right corner (e.g. "5:00:03 / 8:00:02").
-  function drawStamp(g, w, h, label) {
-    if (!label) return;
-    const px = Math.max(12, Math.round(Math.min(w, h * 16 / 9) * 0.022));
-    g.save();
-    g.font = '700 ' + px + 'px "Segoe UI", Roboto, Arial, sans-serif';
-    g.textBaseline = 'middle'; g.textAlign = 'right';
-    const tw = g.measureText(label).width, padX = px * 0.6, bh = px * 1.6, m = Math.max(6, px * 0.6);
-    const x1 = w - m, y1 = h - m, x0 = x1 - tw - padX * 2, y0 = y1 - bh;
-    g.fillStyle = 'rgba(0,0,0,0.62)';
-    if (g.roundRect) { g.beginPath(); g.roundRect(x0, y0, x1 - x0, bh, px * 0.35); g.fill(); } else g.fillRect(x0, y0, x1 - x0, bh);
-    g.fillStyle = '#fff';
-    g.fillText(label, x1 - padX, y0 + bh / 2 + 1);
-    g.restore();
+  // Stream title (live and VOD pages use the same element).
+  function readTitle() {
+    const n = document.querySelector(CFG.titleSel);
+    return n ? n.textContent.replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+  }
+  // VOD pages carry the broadcast start as an ISO time in a title attribute
+  // next to the VOD title ("2 days ago" hover). Returns ms or 0.
+  function readVodStart() {
+    const t = document.querySelector(CFG.titleSel);
+    let box = t;
+    for (let i = 0; box && i < 6; i++) box = box.parentElement;
+    for (const n of (box || document).querySelectorAll('[title]')) {
+      const s = n.getAttribute('title');
+      if (/^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?Z$/.test(s)) { const ms = Date.parse(s); if (ms) return ms; }
+    }
+    return 0;
+  }
+  // The date the frame was actually on air: VOD start + position, else the
+  // wall-clock moment it was captured.
+  function airDate(t, fallback) {
+    if (t && t.kind === 'vod' && t.start) return new Date(t.start + t.pos * 1000);
+    return fallback || new Date();
+  }
+  // A black info bar UNDER the frame (the picture itself is untouched):
+  //   1:22:15 / LIVE                                  kick.com/channel
+  //   Sun, Oct 5, 2026 ? Stream title
+  // Returns a new canvas w x (h + bar). src = canvas holding the frame.
+  function barHeight(w, h) { return Math.round(Math.max(46, Math.min(150, Math.min(w, h * 16 / 9) * 0.075))); }
+  function withInfoBar(src, w, h, info) {
+    const bh = barHeight(w, h);
+    const out = new OffscreenCanvas(w, h + bh);
+    const g = out.getContext('2d', { alpha: false });
+    g.drawImage(src, 0, 0);
+    g.fillStyle = '#0b0b0c'; g.fillRect(0, h, w, bh);
+    const pad = Math.round(bh * 0.32), big = Math.round(bh * 0.34), small = Math.round(bh * 0.22);
+    const font = (wt, px) => wt + ' ' + px + 'px "Segoe UI", Roboto, Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
+    const y1 = h + bh * 0.36, y2 = h + bh * 0.74;
+    g.textBaseline = 'middle';
+    // right: where it is from
+    g.font = font(600, small); g.fillStyle = '#9aa2aa'; g.textAlign = 'right';
+    const site = info.channel ? 'kick.com/' + info.channel : 'kick.com';
+    g.fillText(site, w - pad, y1);
+    const siteW = g.measureText(site).width;
+    // line 1: time
+    g.textAlign = 'left'; g.font = font(700, big); g.fillStyle = '#ffffff';
+    if (info.time) g.fillText(fitText(g, info.time, w - pad * 3 - siteW), pad, y1);
+    // line 2: date + title
+    g.font = font(400, small); g.fillStyle = '#c4c9ce';
+    const line2 = [info.date, info.title].filter(Boolean).join('  \u00b7  ');
+    if (line2) g.fillText(fitText(g, line2, w - pad * 2), pad, y2);
+    return out;
+  }
+  // Cut text with an ellipsis so it fits maxW.
+  function fitText(g, s, maxW) {
+    if (g.measureText(s).width <= maxW) return s;
+    let lo = 0, hi = s.length;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (g.measureText(s.slice(0, mid) + '\u2026').width <= maxW) lo = mid; else hi = mid - 1; }
+    return s.slice(0, lo).trimEnd() + '\u2026';
+  }
+  function fmtDay(d) {
+    try { return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); } catch (_) { return d.toDateString(); }
   }
   function pngName(channel, date, t) {
     const n = CORE.fileName(settings.filePattern, channel, date, 'png');
@@ -1248,13 +1297,12 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       await freshLiveTime(v);                 // Kick hides its time bar when the mouse is away
       const st = streamTime(v);              // read before drawing so they match
       const w = v.videoWidth, h = v.videoHeight;
-      const c = new OffscreenCanvas(w, h);
-      const g = c.getContext('2d', { alpha: false });
-      g.drawImage(v, 0, 0, w, h);
-      const label = CORE.timeLabel(st);
-      if (settings.pngStamp) drawStamp(g, w, h, label);
+      let c = new OffscreenCanvas(w, h);
+      c.getContext('2d', { alpha: false }).drawImage(v, 0, 0, w, h);
+      const label = CORE.timeLabel(st), now = new Date();
+      if (settings.pngStamp) c = withInfoBar(c, w, h, { time: label, date: fmtDay(airDate(st, now)), title: readTitle(), channel: channelName() });
       const blob = await c.convertToBlob({ type: 'image/png' });
-      const name = pngName(channelName(), new Date(), st);
+      const name = pngName(channelName(), now, st);
       saveBlob(blob, name);
       if (pill.snap) { pill.snap.classList.add('flash'); setTimeout(() => pill.snap.classList.remove('flash'), 350); }
       toast('Saved', name + ' · ' + w + ' x ' + h + (label ? ' · ' + label : '') + ' · ' + fmtBytes(blob.size));
@@ -1283,7 +1331,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       modal({ title: 'Nothing to edit', body: ['Nothing moved - was the stream paused?', 'Only ' + r.frames.length + (r.frames.length === 1 ? ' frame was' : ' frames were') + ' captured. The video has to be playing and the tab visible while recording.'], cancel: false, ok: 'OK' });
       return;
     }
-    openEditor({ frames: r.frames, fps: r.fps, channel: r.channel, startedAt: r.startedAt, dropped: r.dropped, time0: clipTime0() });
+    openEditor({ frames: r.frames, fps: r.fps, channel: r.channel, startedAt: r.startedAt, dropped: r.dropped, time0: clipTime0(), title: readTitle() });
   }
   function toggleRecord() { if (recording()) stopRecording('user'); else startRecording(); }
   function clipLast() {
@@ -1292,7 +1340,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     const frames = S.ring.slice();
     const secs = (frames[frames.length - 1].t - frames[0].t) / 1000;
     console.log(TAG, `froze rewind buffer: ${frames.length} frames, ${secs.toFixed(1)} s`);
-    openEditor({ frames, fps: S.fps, channel: channelName(), startedAt: new Date(Date.now() - secs * 1000), dropped: 0, time0: clipTime0() });
+    openEditor({ frames, fps: S.fps, channel: channelName(), startedAt: new Date(Date.now() - secs * 1000), dropped: 0, time0: clipTime0(), title: readTitle() });
   }
 
   // Watchdog: player swaps, SPA navigation, hidden tab.
@@ -1506,7 +1554,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       const meta = { id, channel: clip.channel, startedAt: +clip.startedAt, fps: clip.fps, n: frames.length, durMs: frames.length * 1000 / clip.fps,
         bytes, thumb: frames[Math.floor(frames.length / 2)].blob, savedAt: Date.now(), edits: null };
       await this.run(['clips', 'meta'], 'readwrite', (t) => {
-        t.objectStore('clips').put({ id, frames, fps: clip.fps, channel: clip.channel, startedAt: +clip.startedAt, dropped: clip.dropped || 0, time0: clip.time0 || null });
+        t.objectStore('clips').put({ id, frames, fps: clip.fps, channel: clip.channel, startedAt: +clip.startedAt, dropped: clip.dropped || 0, time0: clip.time0 || null, title: clip.title || '' });
         t.objectStore('meta').put(meta);
       });
       const all = await this.list();
@@ -2240,9 +2288,11 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       const prep = makePrep(E, w, h);
       await prep.draw(E.play);
       const ft = frameTime(E.clip, E.play), label = CORE.timeLabel(ft);
-      if (settings.pngStamp) drawStamp(prep.g, w, h, label);
-      const blob = await prep.canvas.convertToBlob({ type: 'image/png' });
-      const when = new Date(+E.clip.startedAt + E.play * 1000 / E.clip.fps);
+      const fr = E.clip.frames;
+      const when = new Date(+E.clip.startedAt + (fr[E.play] && fr[0] ? fr[E.play].t - fr[0].t : E.play * 1000 / E.clip.fps));
+      let outC = prep.canvas;
+      if (settings.pngStamp) outC = withInfoBar(prep.canvas, w, h, { time: label, date: fmtDay(airDate(ft, when)), title: E.clip.title || '', channel: E.clip.channel });
+      const blob = await outC.convertToBlob({ type: 'image/png' });
       const name = pngName(E.clip.channel, when, ft);
       saveBlob(blob, name);
       toast('Saved', name + ' · ' + w + ' x ' + h + (label ? ' · ' + label : '') + ' · ' + fmtBytes(blob.size));
@@ -2613,7 +2663,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     try {
       const [rec, meta] = await Promise.all([recent.load(id), recent.getMeta(id)]);
       if (!rec || !rec.frames || rec.frames.length < 2) { toast('That clip is gone', 'from storage.', true); renderRecent(); return; }
-      const clip = { id, frames: rec.frames, fps: rec.fps, channel: rec.channel, startedAt: new Date(rec.startedAt), dropped: rec.dropped || 0, time0: rec.time0 || null };
+      const clip = { id, frames: rec.frames, fps: rec.fps, channel: rec.channel, startedAt: new Date(rec.startedAt), dropped: rec.dropped || 0, time0: rec.time0 || null, title: rec.title || '' };
       openEditor(clip, meta && meta.edits);
     } catch (e) { toast('Could not open the clip.', String(e && (e.message || e.name)), true); }
   }
@@ -2682,7 +2732,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     fp.addEventListener('change', () => { const v = fp.value.trim() || DEFAULTS.filePattern; fp.value = v; set('filePattern', v); });
     const cnt = el('input', { type: 'checkbox', checked: settings.showCounter, 'aria-label': 'Show frame counter on the launcher', title: 'Show frames and size on the launcher while recording, so you can see how big the clip is getting.' });
     cnt.addEventListener('change', () => set('showCounter', cnt.checked));
-    const stampChk = el('input', { type: 'checkbox', checked: settings.pngStamp, 'aria-label': 'Stamp the stream time on PNG snapshots', title: 'Draws where you are / how long the VOD or stream is (5:00:03 / 8:00:02) in the corner of PNG snapshots, so you know where the frame came from. The time is always in the file name either way.' });
+    const stampChk = el('input', { type: 'checkbox', checked: settings.pngStamp, 'aria-label': 'Add an info bar under PNG snapshots', title: 'Adds a slim black bar under each PNG with the time (5:00:03 / 8:00:02 on VODs, 1:22:15 / LIVE on live), the date and the stream title, so you know where the frame came from. The picture itself is never covered. The time is in the file name either way.' });
     stampChk.addEventListener('change', () => set('pngStamp', stampChk.checked));
 
     const fileIn = el('input', { type: 'file', accept: 'application/json,.json', hidden: true, 'aria-label': 'Restore settings file' });
@@ -2713,7 +2763,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
         el('div', { class: 'kgc-out' }, [el('span', { class: 'kgc-lab', text: 'keep' }), rK]),
         el('div', { class: 'kgc-row', style: 'margin-top:6px' }, [rClear])]),
       el('div', { class: 'kgc-sec' }, [el('label', { class: 'kgc-row', style: 'cursor:pointer', title: cnt.title }, [cnt, el('span', { text: 'Show frame counter on the launcher' })]),
-        el('label', { class: 'kgc-row', style: 'cursor:pointer', title: stampChk.title }, [stampChk, el('span', { text: 'Stamp the stream time on PNG snapshots' })])]),
+        el('label', { class: 'kgc-row', style: 'cursor:pointer', title: stampChk.title }, [stampChk, el('span', { text: 'Add an info bar (time, date, title) under PNG snapshots' })])]),
       el('div', { class: 'kgc-sec' }, [el('div', { class: 'kgc-row' }, [
         btn('Backup', '', 'Download your settings as a JSON file', backupSettings, 'Backup settings'),
         btn('Restore', '', 'Load settings from a backup JSON file', () => fileIn.click(), 'Restore settings'),
