@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.3.0
+// @version      0.4.0
 // @description  Turn a moment of a live Kick stream into a GIF (or WebM), or save the current frame as a PNG in one click, without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -44,13 +44,14 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick
   // player change is a one-place fix.
   const CFG = {
     minVideoArea: 160 * 90,   // ignore tiny / 0x0 videos (Kick keeps a hidden static one that taints the canvas)
+    uptimeSel: '.tabular-nums.font-bold',   // Kick's live uptime counter in the player bar
     webpQuality: 0.82,
     maxEditorFrames: 600,     // warn before exporting more than this
     sizeWarnBytes: 10 * 1024 * 1024,
@@ -525,6 +526,34 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       return cat([header, ebml(0x18538067, [info, tracks].concat(clusters))]);
     }
 
+    /* ---------------- stream / VOD time labels ---------------------------- */
+    // h:mm:ss with hours that keep counting past 24 (Kick shows d:hh:mm:ss).
+    function fmtHMS(sec) {
+      sec = Math.max(0, Math.floor(sec || 0));
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    }
+    // "5:00:03" / "1:00:49:08" / "12:34" -> seconds (null if not a time).
+    function parseHMS(text) {
+      const m = String(text || '').trim().match(/^(\d{1,3})(?::(\d\d))(?::(\d\d))?(?::(\d\d))?$/);
+      if (!m) return null;
+      const p = m.slice(1).filter((x) => x != null).map(Number);
+      if (p.length === 4) return p[0] * 86400 + p[1] * 3600 + p[2] * 60 + p[3];   // d:hh:mm:ss
+      if (p.length === 3) return p[0] * 3600 + p[1] * 60 + p[2];                  // h:mm:ss
+      return p[0] * 60 + p[1];                                                     // m:ss
+    }
+    // {kind:'vod'|'live', pos, dur} -> what goes on the image and in the file name.
+    function timeLabel(t) {
+      if (!t || !(t.pos >= 0)) return '';
+      if (t.kind === 'vod') return fmtHMS(t.pos) + (t.dur > 0 ? ' / ' + fmtHMS(t.dur) : '');
+      return 'LIVE ' + fmtHMS(t.pos);
+    }
+    function timeTag(t) {
+      if (!t || !(t.pos >= 0)) return '';
+      const s = Math.floor(t.pos), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+      return (t.kind === 'live' ? 'live-' : 'at-') + h + 'h' + String(m).padStart(2, '0') + 'm' + String(x).padStart(2, '0') + 's';
+    }
+
     /* ---------------- small helpers --------------------------------------- */
     function fmtTime(ms) {
       ms = Math.max(0, ms || 0);
@@ -563,7 +592,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     return {
       gifenc, timeline, crop, dither, createWriter, encodeGif, delayCs, effectiveFps,
       loopToRepeat, evenlySpaced, samplePixels, fmtTime, fmtBytes, fileName, stamp, decimateByTime, even, clamp,
-      wrapText, pickSize, muxWebM,
+      wrapText, pickSize, muxWebM, fmtHMS, parseHMS, timeLabel, timeTag,
     };
   }
 
@@ -633,7 +662,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     hotkeys: { record: 'Alt+Shift+KeyR', last: 'Alt+Shift+KeyL', snap: 'Alt+Shift+KeyS', toggle: 'Alt+Shift+KeyG' },
     outWidth: 480, outFps: 15, speed: 1, loop: 'forever', palette: 'global', dither: 'ordered',
     format: 'gif', targetMB: 0, recentKeep: 5, capStyle: 'meme', capSize: 'm',
-    filePattern: 'kick_{channel}_{date}.gif', showCounter: true,
+    filePattern: 'kick_{channel}_{date}.gif', showCounter: true, pngStamp: true,
   };
   // dy 56 keeps the pill above Kick's control bar (its fullscreen / theater / settings
   // buttons sit in the bottom ~48 px of the player).
@@ -674,6 +703,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     s.capSize = pick(v.capSize, CHOICES.capSize, DEFAULTS.capSize);
     s.filePattern = typeof v.filePattern === 'string' && v.filePattern.trim() ? v.filePattern.trim().slice(0, 120) : DEFAULTS.filePattern;
     s.showCounter = typeof v.showCounter === 'boolean' ? v.showCounter : DEFAULTS.showCounter;
+    s.pngStamp = typeof v.pngStamp === 'boolean' ? v.pngStamp : DEFAULTS.pngStamp;
     return s;
   }
   const settings = sanitizeSettings(readJSON('kgc:settings'));
@@ -1048,7 +1078,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       if (S.canvas.width !== w || S.canvas.height !== h) { S.canvas.width = w; S.canvas.height = h; }
       S.ctx.drawImage(v, 0, 0, w, h);
       const blob = await S.canvas.convertToBlob({ type: 'image/webp', quality: CFG.webpQuality });
-      const f = { t: t0, blob, w, h };
+      const f = { t: t0, blob, w, h, vt: ct };   // vt = video clock, for VOD / uptime stamps
       S.avgBlob = S.avgBlob ? S.avgBlob * 0.9 + blob.size * 0.1 : blob.size;
       if (S.ring) {
         S.ring.push(f);
@@ -1115,6 +1145,56 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
+  // Where we are in the stream. VOD pages: the video's own position and length.
+  // Live: Kick's uptime counter in the player bar (the video clock there starts
+  // at 0 when you open the page, so it is not the stream time).
+  function readUptime() {
+    for (const n of document.querySelectorAll(CFG.uptimeSel)) {
+      if (n.children.length) continue;
+      const s = CORE.parseHMS(n.textContent);
+      if (s != null) return s;
+    }
+    return null;
+  }
+  function streamTime(v) {
+    v = v || findVideo();
+    if (!v) return null;
+    if (/\/videos\//.test(location.pathname) && isFinite(v.duration) && v.duration > 0) return { kind: 'vod', pos: v.currentTime, dur: v.duration, vt: v.currentTime };
+    const up = readUptime();
+    return up == null ? null : { kind: 'live', pos: up, vt: v.currentTime };
+  }
+  // A clip remembers how its frames' video clock maps to stream time, so every
+  // frame (even reopened from Recent clips) knows its own VOD position / uptime.
+  function clipTime0() {
+    const st = streamTime(S.video && S.video.isConnected ? S.video : null);
+    return st ? { kind: st.kind, offset: st.pos - st.vt, dur: st.dur || 0 } : null;
+  }
+  function frameTime(clip, i) {
+    const f = clip.frames[i], z = clip.time0;
+    if (!z || !f || f.vt == null) return null;
+    return { kind: z.kind, pos: f.vt + z.offset, dur: z.dur };
+  }
+  // Small time badge in the bottom-right corner (e.g. "5:00:03 / 8:00:02").
+  function drawStamp(g, w, h, label) {
+    if (!label) return;
+    const px = Math.max(12, Math.round(Math.min(w, h * 16 / 9) * 0.022));
+    g.save();
+    g.font = '700 ' + px + 'px "Segoe UI", Roboto, Arial, sans-serif';
+    g.textBaseline = 'middle'; g.textAlign = 'right';
+    const tw = g.measureText(label).width, padX = px * 0.6, bh = px * 1.6, m = Math.max(6, px * 0.6);
+    const x1 = w - m, y1 = h - m, x0 = x1 - tw - padX * 2, y0 = y1 - bh;
+    g.fillStyle = 'rgba(0,0,0,0.62)';
+    if (g.roundRect) { g.beginPath(); g.roundRect(x0, y0, x1 - x0, bh, px * 0.35); g.fill(); } else g.fillRect(x0, y0, x1 - x0, bh);
+    g.fillStyle = '#fff';
+    g.fillText(label, x1 - padX, y0 + bh / 2 + 1);
+    g.restore();
+  }
+  function pngName(channel, date, t) {
+    const n = CORE.fileName(settings.filePattern, channel, date, 'png');
+    const tag = CORE.timeTag(t);
+    return tag ? n.replace(/\.png$/, '_' + tag + '.png') : n;
+  }
+
   // Current live frame at the stream's full resolution, as a PNG.
   let snapBusy = false;
   async function snapshot() {
@@ -1123,14 +1203,18 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     if (!v || !v.videoWidth) { toast('No player on this page.', 'Open a live channel (and pass any 18+ gate) first.', true); return; }
     snapBusy = true;
     try {
+      const st = streamTime(v);              // read before drawing so they match
       const w = v.videoWidth, h = v.videoHeight;
       const c = new OffscreenCanvas(w, h);
-      c.getContext('2d', { alpha: false }).drawImage(v, 0, 0, w, h);
+      const g = c.getContext('2d', { alpha: false });
+      g.drawImage(v, 0, 0, w, h);
+      const label = CORE.timeLabel(st);
+      if (settings.pngStamp) drawStamp(g, w, h, label);
       const blob = await c.convertToBlob({ type: 'image/png' });
-      const name = CORE.fileName(settings.filePattern, channelName(), new Date(), 'png');
+      const name = pngName(channelName(), new Date(), st);
       saveBlob(blob, name);
       if (pill.snap) { pill.snap.classList.add('flash'); setTimeout(() => pill.snap.classList.remove('flash'), 350); }
-      toast('Saved', name + ' · ' + w + ' x ' + h + ' · ' + fmtBytes(blob.size));
+      toast('Saved', name + ' · ' + w + ' x ' + h + (label ? ' · ' + label : '') + ' · ' + fmtBytes(blob.size));
     } catch (e) {
       S.lastErr = 'PNG: ' + ((e && (e.name + ': ' + e.message)) || e);
       toast('Could not grab the frame.', e && e.name === 'SecurityError' ? 'This player\'s pixels are locked (cross-origin).' : String(e && e.message || e), true);
@@ -1156,7 +1240,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       modal({ title: 'Nothing to edit', body: ['Nothing moved - was the stream paused?', 'Only ' + r.frames.length + (r.frames.length === 1 ? ' frame was' : ' frames were') + ' captured. The video has to be playing and the tab visible while recording.'], cancel: false, ok: 'OK' });
       return;
     }
-    openEditor({ frames: r.frames, fps: r.fps, channel: r.channel, startedAt: r.startedAt, dropped: r.dropped });
+    openEditor({ frames: r.frames, fps: r.fps, channel: r.channel, startedAt: r.startedAt, dropped: r.dropped, time0: clipTime0() });
   }
   function toggleRecord() { if (recording()) stopRecording('user'); else startRecording(); }
   function clipLast() {
@@ -1165,7 +1249,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     const frames = S.ring.slice();
     const secs = (frames[frames.length - 1].t - frames[0].t) / 1000;
     console.log(TAG, `froze rewind buffer: ${frames.length} frames, ${secs.toFixed(1)} s`);
-    openEditor({ frames, fps: S.fps, channel: channelName(), startedAt: new Date(Date.now() - secs * 1000), dropped: 0 });
+    openEditor({ frames, fps: S.fps, channel: channelName(), startedAt: new Date(Date.now() - secs * 1000), dropped: 0, time0: clipTime0() });
   }
 
   // Watchdog: player swaps, SPA navigation, hidden tab.
@@ -1374,12 +1458,12 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       const keep = settings.recentKeep;
       if (!keep || typeof indexedDB === 'undefined') return false;
       const id = clip.id = clip.id || ('c' + Date.now() + Math.random().toString(36).slice(2, 7));
-      const frames = clip.frames.map((f) => ({ t: f.t, blob: f.blob, w: f.w, h: f.h }));
+      const frames = clip.frames.map((f) => ({ t: f.t, blob: f.blob, w: f.w, h: f.h, vt: f.vt }));
       const bytes = frames.reduce((a, f) => a + f.blob.size, 0);
       const meta = { id, channel: clip.channel, startedAt: +clip.startedAt, fps: clip.fps, n: frames.length, durMs: frames.length * 1000 / clip.fps,
         bytes, thumb: frames[Math.floor(frames.length / 2)].blob, savedAt: Date.now(), edits: null };
       await this.run(['clips', 'meta'], 'readwrite', (t) => {
-        t.objectStore('clips').put({ id, frames, fps: clip.fps, channel: clip.channel, startedAt: +clip.startedAt, dropped: clip.dropped || 0 });
+        t.objectStore('clips').put({ id, frames, fps: clip.fps, channel: clip.channel, startedAt: +clip.startedAt, dropped: clip.dropped || 0, time0: clip.time0 || null });
         t.objectStore('meta').put(meta);
       });
       const all = await this.list();
@@ -2112,11 +2196,13 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       const { w, h } = crop.outputSize(c, c.w);
       const prep = makePrep(E, w, h);
       await prep.draw(E.play);
+      const ft = frameTime(E.clip, E.play), label = CORE.timeLabel(ft);
+      if (settings.pngStamp) drawStamp(prep.g, w, h, label);
       const blob = await prep.canvas.convertToBlob({ type: 'image/png' });
       const when = new Date(+E.clip.startedAt + E.play * 1000 / E.clip.fps);
-      const name = CORE.fileName(settings.filePattern, E.clip.channel, when, 'png');
+      const name = pngName(E.clip.channel, when, ft);
       saveBlob(blob, name);
-      toast('Saved', name + ' · ' + w + ' x ' + h + ' · ' + fmtBytes(blob.size));
+      toast('Saved', name + ' · ' + w + ' x ' + h + (label ? ' · ' + label : '') + ' · ' + fmtBytes(blob.size));
     } catch (e) { toast('Could not save the frame.', String(e && e.message || e), true); }
   }
 
@@ -2484,7 +2570,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     try {
       const [rec, meta] = await Promise.all([recent.load(id), recent.getMeta(id)]);
       if (!rec || !rec.frames || rec.frames.length < 2) { toast('That clip is gone', 'from storage.', true); renderRecent(); return; }
-      const clip = { id, frames: rec.frames, fps: rec.fps, channel: rec.channel, startedAt: new Date(rec.startedAt), dropped: rec.dropped || 0 };
+      const clip = { id, frames: rec.frames, fps: rec.fps, channel: rec.channel, startedAt: new Date(rec.startedAt), dropped: rec.dropped || 0, time0: rec.time0 || null };
       openEditor(clip, meta && meta.edits);
     } catch (e) { toast('Could not open the clip.', String(e && (e.message || e.name)), true); }
   }
@@ -2553,6 +2639,8 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     fp.addEventListener('change', () => { const v = fp.value.trim() || DEFAULTS.filePattern; fp.value = v; set('filePattern', v); });
     const cnt = el('input', { type: 'checkbox', checked: settings.showCounter, 'aria-label': 'Show frame counter on the launcher', title: 'Show frames and size on the launcher while recording, so you can see how big the clip is getting.' });
     cnt.addEventListener('change', () => set('showCounter', cnt.checked));
+    const stampChk = el('input', { type: 'checkbox', checked: settings.pngStamp, 'aria-label': 'Stamp the stream time on PNG snapshots', title: 'Draws the VOD position (5:00:03 / 8:00:02) or the live uptime (LIVE 5:00:03) in the corner of PNG snapshots, so you know where the frame came from. The time is always in the file name either way.' });
+    stampChk.addEventListener('change', () => set('pngStamp', stampChk.checked));
 
     const fileIn = el('input', { type: 'file', accept: 'application/json,.json', hidden: true, 'aria-label': 'Restore settings file' });
     fileIn.addEventListener('change', async () => {
@@ -2581,7 +2669,8 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
       el('div', { class: 'kgc-sec' }, [el('h4', null, ['Recent clips', tip('Your latest clips are kept in this browser (kick.com site storage) so a reload never loses one. Clearing site data for kick.com also clears them.')]),
         el('div', { class: 'kgc-out' }, [el('span', { class: 'kgc-lab', text: 'keep' }), rK]),
         el('div', { class: 'kgc-row', style: 'margin-top:6px' }, [rClear])]),
-      el('div', { class: 'kgc-sec' }, [el('label', { class: 'kgc-row', style: 'cursor:pointer', title: cnt.title }, [cnt, el('span', { text: 'Show frame counter on the launcher' })])]),
+      el('div', { class: 'kgc-sec' }, [el('label', { class: 'kgc-row', style: 'cursor:pointer', title: cnt.title }, [cnt, el('span', { text: 'Show frame counter on the launcher' })]),
+        el('label', { class: 'kgc-row', style: 'cursor:pointer', title: stampChk.title }, [stampChk, el('span', { text: 'Stamp the stream time on PNG snapshots' })])]),
       el('div', { class: 'kgc-sec' }, [el('div', { class: 'kgc-row' }, [
         btn('Backup', '', 'Download your settings as a JSON file', backupSettings, 'Backup settings'),
         btn('Restore', '', 'Load settings from a backup JSON file', () => fileIn.click(), 'Restore settings'),

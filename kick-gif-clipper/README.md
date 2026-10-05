@@ -31,6 +31,11 @@ login, and the script makes no network requests at all.
   current video frame as a full-resolution PNG straight to your downloads, with
   no dialog. In the editor, the **PNG** button next to the timecode saves the
   frame under the playhead with your crop and caption applied.
+  Each PNG is stamped in the corner with where it came from: the VOD position
+  (`5:00:03 / 8:00:02`) on VOD pages, or the stream uptime (`LIVE 5:00:03`) on
+  live channels. The same time goes in the file name (`..._at-5h00m03s.png` /
+  `..._live-5h00m03s.png`) so snapshots sort in order. The corner stamp can be
+  turned off in settings.
 - **Captions**: top and bottom text, in *Meme* style (bold white capitals with a
   black outline) or *Subtitle* style (text on a dark bar), small / medium /
   large. Long text wraps and shrinks to fit. The preview shows exactly what the
@@ -100,6 +105,7 @@ must include Ctrl or Alt so it never fires while you type in chat).
 | Size limit | no limit | Start every clip with a limit, e.g. your chat app's upload cap. |
 | Output defaults | 480 px, 15 fps, ordered dither, global palette, loop forever | What each new clip starts with. |
 | Caption | Meme, medium | Starting caption style and size. |
+| Stamp the stream time on PNG snapshots | on | Shows the VOD position or live uptime in the corner of each PNG. The file name has it either way. |
 | Recent clips | keep 5 | How many clips stay in the browser (0 = off). **Clear recent clips** deletes them all. |
 | File name | `kick_{channel}_{date}.gif` | `{channel}` and `{date}` are filled in. |
 | Frame counter on the pill | on | See how big a recording is getting. |
@@ -171,6 +177,15 @@ a WebM round trip (the file is parsed back: track, size, clusters, keyframes,
 timestamps).
 
 ## Changelog
+
+### 0.4.0
+- **PNG snapshots now show where they came from.** On a VOD the corner reads
+  the position and length (`5:00:03 / 8:00:02`); on a live channel it reads the
+  stream uptime from Kick's player bar (`LIVE 5:00:03`). The time is also in the
+  file name, so a folder of snapshots sorts in order and you can jump back to
+  the exact moment. Editor PNGs get the right time for the frame under the
+  playhead, even for clips reopened from Recent clips.
+- New setting to turn the corner stamp off (the file name keeps the time).
 
 ### 0.3.0
 - **Save a frame as a PNG in one click.** A **PNG** button on the pill and an
