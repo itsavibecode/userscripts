@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.5.0
+// @version      0.5.1
 // @description  Turn a moment of a live Kick stream into a GIF (or WebM), or save the current frame as a PNG in one click, without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
@@ -44,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.5.0';
+  const VERSION = '0.5.1';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick
@@ -784,6 +784,11 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   @keyframes kgcpulse{0%,100%{opacity:1}50%{opacity:.25}}
   .kgc-tc{font-weight:700;font-variant-numeric:tabular-nums;color:var(--rec);display:inline-flex;align-items:center;gap:6px}
   .kgc-meta{color:var(--muted);font-size:11px;white-space:nowrap}
+  /* Live numbers get equal-width digits and a fixed slot, so the pill (pinned by its
+     right edge) does not grow and shrink as the timer, frame count and size tick. */
+  .kgc-live{display:inline-block;font-variant-numeric:tabular-nums;text-align:left}
+  .kgc-meta.kgc-live{min-width:21ch}
+  .kgc-chip .kgc-live{min-width:19ch}
   .kgc-meta.warn{color:var(--warn)}
   .kgc-chip{height:22px;padding:0 4px 0 8px;border-radius:999px;display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
     background:var(--sel);color:var(--accent);border:1px solid var(--accent);white-space:nowrap}
@@ -1377,10 +1382,10 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
     P.none = el('span', { class: 'kgc-meta', text: 'GIF Clipper · no player on this page' });
     P.rec = el('button', { class: 'kgc-btn rec', type: 'button', 'aria-label': 'Start recording', onclick: toggleRecord });
     P.tc = el('span', { class: 'kgc-tc' });
-    P.meta = el('span', { class: 'kgc-meta' });
+    P.meta = el('span', { class: 'kgc-meta kgc-live' });
     P.note = el('span', { class: 'kgc-meta warn' });
     P.last = el('button', { class: 'kgc-btn', type: 'button', onclick: clipLast });
-    P.chipTxt = el('span');
+    P.chipTxt = el('span', { class: 'kgc-live' });
     P.chip = el('span', { class: 'kgc-chip', title: 'Rewind buffer is running: it keeps the last few seconds so you can clip a moment after it happens.' }, [P.chipTxt,
       el('button', { type: 'button', text: '×', title: 'Turn the rewind buffer off (frees its memory)', 'aria-label': 'Turn rewind buffer off', onclick: () => disarm() })]);
     P.gear = el('button', { class: 'kgc-btn ic', type: 'button', text: '⚙', title: 'Settings: capture fps / width, rewind buffer, hotkeys, output defaults', 'aria-label': 'Settings', onclick: () => toggleSettings() });

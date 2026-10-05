@@ -180,6 +180,12 @@ timestamps).
 
 ## Changelog
 
+### 0.5.1
+- The launcher no longer twitches while recording or while the rewind buffer
+  fills. Its live numbers (timer, frame count, size) now use equal-width digits
+  in a fixed-width slot, so the pill keeps one width instead of growing and
+  shrinking as the numbers change.
+
 ### 0.5.0
 - **PNG snapshots get an info bar instead of a corner stamp.** A slim black bar
   under the frame (nothing covers the picture) shows the time, `5:00:03 / 8:00:02`
