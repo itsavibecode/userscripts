@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         Kick GIF Clipper
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.5.1
+// @version      0.6.0
 // @description  Turn a moment of a live Kick stream into a GIF (or WebM), or save the current frame as a PNG in one click, without leaving the tab: record (or grab the last N seconds from an optional rewind buffer), trim / cut / crop, add captions or a boomerang loop, fit a size limit, and download. Recent clips survive a reload. Everything runs in the browser; nothing is uploaded.
 // @author       itsavibecode
 // @match        https://kick.com/*
+// @match        https://player.kick.com/*
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
-// @noframes
 // @homepageURL  https://bookhockeys.com/gifclipper/
 // @supportURL   https://bookhockeys.com/gifclipper/
 // @updateURL    https://bookhockeys.com/gifclipper/kick-gif-clipper.user.js
@@ -34,7 +34,13 @@
  * built, the same code runs on the main thread in small chunks.
  *
  * WebM export (optional) uses WebCodecs VideoEncoder plus a small WebM muxer
- * in the core. Recent clips are kept in IndexedDB on kick.com.
+ * in the core. Recent clips are kept in IndexedDB per origin (kick.com and
+ * player.kick.com each have their own list).
+ *
+ * The script also runs inside Kick's embed player (player.kick.com), which
+ * other sites put in an iframe, so the same pill works on pages such as
+ * bookhockeys.com/stumble. Any other kick.com frame on a foreign page (chat
+ * popouts, for example) is left alone.
  *
  * The pure parts (gifenc, timeline, crop, dither, GIF writer, WebM muxer) live in
  * makeCore(). That one function is (1) used here, (2) stringified into the
@@ -44,7 +50,11 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.5.1';
+  // Inside a frame, only the embed player is ours. kick.com frames embedded
+  // in other sites (chat popouts) have no video and get no pill.
+  if (typeof window !== 'undefined' && window.self !== window.top && location.hostname !== 'player.kick.com') return;
+
+  const VERSION = '0.6.0';
   const TAG = '[GIF Clipper]';
 
   // Selectors and limits that depend on Kick's page. Kept together so a Kick
@@ -815,7 +825,7 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
   .kgc-title .wb{margin-left:auto;display:flex;gap:4px;flex:0 0 auto}
   .kgc-title .wb button{width:24px;height:24px;border-radius:var(--rs);background:var(--raised);border:1px solid var(--border);font-size:13px}
 
-  #kgc-editor{resize:both;min-width:640px;min-height:480px;max-width:96vw;max-height:92vh;container-type:inline-size}
+  #kgc-editor{resize:both;min-width:min(640px,calc(100vw - 16px));min-height:min(480px,calc(100vh - 16px));max-width:96vw;max-height:92vh;container-type:inline-size}
   #kgc-editor.min{resize:none;min-height:0;height:auto!important}
   #kgc-editor.min .kgc-ebody,#kgc-editor.min .kgc-foot{display:none}
   .kgc-ebody{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 248px;overflow:hidden}
@@ -1721,7 +1731,8 @@ var X={signature:"GIF",version:"89a",trailer:59,extensionIntroducer:33,applicati
 
   function placeEditor(E) {
     const R = E.root, s = ui.editor;
-    const w = clampN(s.w || 880, 640, innerWidth * 0.96), h = clampN(s.h || 620, 480, innerHeight * 0.92);
+    // Minimums shrink inside a small embed frame so the editor never outgrows it.
+    const w = clampN(s.w || 880, Math.min(640, innerWidth - 16), innerWidth * 0.96), h = clampN(s.h || 620, Math.min(480, innerHeight - 16), innerHeight * 0.92);
     R.style.width = Math.round(w) + 'px';
     if (!s.min) R.style.height = Math.round(h) + 'px';
     const x = s.x == null ? (innerWidth - w) / 2 : clampN(s.x, 0, Math.max(0, innerWidth - 120));

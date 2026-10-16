@@ -66,7 +66,9 @@ without asking.
    and click **Install GIF Clipper**. Tampermonkey shows an install prompt.
    (Direct link: <https://bookhockeys.com/gifclipper/kick-gif-clipper.user.js>.)
 3. Open a live channel. The console logs `[GIF Clipper] v0.2.1 active` and the
-   pill appears on the player.
+   pill appears on the player. Since 0.6.0 it also appears on Kick's embed
+   player (`player.kick.com`) inside other sites, such as
+   [bookhockeys.com/stumble](https://bookhockeys.com/stumble/).
 
 Installs and updates come from the bookhockeys.com copy. This file is the
 source; each release copies it byte-for-byte to `book/gifclipper/` in the
@@ -179,6 +181,18 @@ a WebM round trip (the file is parsed back: track, size, clusters, keyframes,
 timestamps).
 
 ## Changelog
+
+### 0.6.0
+- **Works inside embedded Kick players.** The script now also runs on
+  `player.kick.com`, the embed that other sites put in an iframe, so the pill,
+  Record, Last 15 s and PNG all work on pages such as
+  [bookhockeys.com/stumble](https://bookhockeys.com/stumble/). Why: Stumble
+  shows streams through that embed and there is no other way to read the
+  video's pixels from a page that is not kick.com. Other kick.com frames on
+  foreign pages (chat popouts) are left alone. Inside a small embed the editor
+  shrinks to fit the frame instead of insisting on 640 x 480. Recent clips are
+  kept per origin, so clips made inside an embed are listed there, not on
+  kick.com. Keyboard shortcuts work once the embed has focus (click it first).
 
 ### 0.5.1
 - The launcher no longer twitches while recording or while the rewind buffer
