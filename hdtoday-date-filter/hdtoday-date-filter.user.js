@@ -1,16 +1,16 @@
 // ==UserScript==
 // @name         HDToday Date Filter
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.1.0
-// @description  Filter and sort hdtoday listings by full release date ("released on or before X" / "between X and Y") with a Hide-unreleased toggle. Listing pages query TMDB discover directly with your own free TMDB key and render results in the site's own card style with full dates; the search modal is date-filtered client-side with no key needed. Draggable, resizable, collapsible settings panel.
+// @version      0.2.0
+// @description  Filter and sort hdtoday listings by full release date ("released on or before X" / "between X and Y") with a Hide-unreleased toggle, plus a Copy-m3u8 button for the stream the player is using. Listing pages query TMDB discover directly with your own free TMDB key and render results in the site's own card style with full dates; the search modal is date-filtered client-side with no key needed. Draggable, resizable, collapsible settings panel.
 // @author       itsavibecode
-// @match        https://hdtodayz.gd/*
-// @run-at       document-idle
+// @match        *://*/*
+// @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
-// @noframes
 // @homepageURL  https://github.com/itsavibecode/userscripts/tree/main/hdtoday-date-filter
 // @supportURL   https://github.com/itsavibecode/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/itsavibecode/userscripts/main/hdtoday-date-filter/hdtoday-date-filter.user.js
@@ -18,9 +18,19 @@
 // ==/UserScript==
 
 /*
- * The site's domain changes over time. To follow it, add another
- *     // @match        https://NEW-DOMAIN/*
- * line above (one per domain). Everything else is path-based and keeps working.
+ * The site's domain changes over time. To follow it, add the new domain to
+ * SITE_HOSTS just below the header. The @match deliberately covers every URL because
+ * the stream sniffer has to run INSIDE the player iframes, which live on
+ * other, ever-changing domains; on every page that is not the site or one of
+ * its player frames the script exits in its first few lines.
+ *
+ * Stream link (Copy m3u8)
+ *   The player is a chain of cross-origin iframes (site -> embed host -> stream
+ *   host). This script runs at document-start in every frame whose ancestor is
+ *   the site, hooks fetch / XMLHttpRequest / media src there, and posts any
+ *   .m3u8 URL it sees to the top page, which shows a Copy button under the
+ *   player and remembers the link so the title's detail page can show it next
+ *   to the poster while the token is still fresh.
  *
  * HOW THIS WORKS
  * --------------
@@ -46,9 +56,58 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
   const TAG = '[HDToday Date Filter]';
   const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
+  // The site's domains. When it moves, add the new one here.
+  const SITE_HOSTS = ['hdtodayz.gd'];
+  const hostOf = (s) => { try { return new URL(s).hostname; } catch (_) { return ''; } };
+  const isSiteHost = (h) => SITE_HOSTS.some((s) => h === s || h.endsWith('.' + s));
+  const M3U8_RX = /\.m3u8(?:[?#]|$)/i;
+
+  /* ------------------------------------------------------------------ *
+   * Frame gate: in a player iframe under the site, sniff the stream and  *
+   * leave; on any other site, leave immediately.                         *
+   * ------------------------------------------------------------------ */
+  let inFrame = false;
+  try { inFrame = W.top !== W.self; } catch (_) { inFrame = true; }
+  if (inFrame) {
+    const ancestors = (location.ancestorOrigins && location.ancestorOrigins.length)
+      ? Array.from(location.ancestorOrigins) : [document.referrer || ''];
+    if (!ancestors.some((o) => isSiteHost(hostOf(o)))) return;
+    installSniffer();
+    return;
+  }
+  if (!isSiteHost(location.hostname)) return;
+
+  function installSniffer() {
+    const seen = new Set();
+    const report = (u) => {
+      try {
+        const s = typeof u === 'string' ? u : (u && u.url) || String(u);
+        if (!M3U8_RX.test(s) || !/^https?:\/\//i.test(s) || seen.has(s)) return;
+        seen.add(s);
+        W.top.postMessage({ hdf: 'm3u8', url: s, frame: location.hostname }, '*');
+      } catch (_) {}
+    };
+    try {
+      const oFetch = W.fetch;
+      W.fetch = function (input, init) { report(input); return oFetch.apply(this, arguments); };
+    } catch (_) {}
+    try {
+      const oOpen = W.XMLHttpRequest.prototype.open;
+      W.XMLHttpRequest.prototype.open = function (m, u) { report(u); return oOpen.apply(this, arguments); };
+    } catch (_) {}
+    try {
+      const d = Object.getOwnPropertyDescriptor(W.HTMLMediaElement.prototype, 'src');
+      if (d && d.set) Object.defineProperty(W.HTMLMediaElement.prototype, 'src', {
+        configurable: true, enumerable: d.enumerable, get: d.get,
+        set(v) { report(v); return d.set.call(this, v); },
+      });
+    } catch (_) {}
+    // Nested frames below us post to top directly; nothing to relay.
+  }
 
   /* ------------------------------------------------------------------ *
    * Storage                                                              *
@@ -317,6 +376,16 @@
   .hdf-msg{font-size:12px;color:#7070a0;overflow-wrap:anywhere}
   .hdf-msg.hdf-ok{color:#55efc4}
   .hdf-msg.hdf-err{color:#ff7675}
+  /* Stream link row (watch page) and poster button (detail page) */
+  .hdf-stream{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .75rem;margin-bottom:1rem;padding:.6rem .75rem;border-radius:8px;background:rgba(108,92,231,.08);border:1px solid rgba(108,92,231,.25);min-width:0;max-width:100%}
+  .hdf-stream .hdf-sl{font-size:.75rem;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#a29bfe}
+  .hdf-stream .hdf-st{font-size:.8125rem;color:#a0a0c0;min-width:0;overflow-wrap:anywhere;flex:1 1 12rem}
+  .hdf-stream .hdf-st b{color:#e8e8f0;font-weight:600}
+  .hdf-stream a.hdf-btn{text-decoration:none;color:#fff}
+  .hdf-btn.hdf-ok{background:#00b894;border-color:#00b894}
+  .hdf-poster-btn{display:flex;flex-direction:column;gap:.4rem;margin-top:.5rem;max-width:100%}
+  .hdf-poster-btn .hdf-btn{width:100%;text-align:center;text-decoration:none;display:block}
+  .hdf-poster-btn small{color:#7070a0;font-size:.7rem;overflow-wrap:anywhere}
   .hdf-rs{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,rgba(255,255,255,.25) 50%,rgba(255,255,255,.25) 60%,transparent 60%,transparent 75%,rgba(255,255,255,.25) 75%,rgba(255,255,255,.25) 85%,transparent 85%)}
   `;
 
@@ -515,12 +584,18 @@
     gear.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
     gear.addEventListener('click', () => togglePanel());
     statusEl = el('span', { class: 'hdf-status' });
-    hintEl = el('span', { class: 'hdf-hint' }, 'Date filter needs a TMDB key: ', el('button', { type: 'button', text: 'open settings', onclick: () => togglePanel(true) }));
+    hintEl = el('span', { class: 'hdf-hint' }, 'Listing needs a free TMDB key (search works without): ', el('button', { type: 'button', text: 'open settings', onclick: () => togglePanel(true) }));
 
     applyBtn.addEventListener('click', () => {
       cfg.range = { from: fromInput.value, to: toInput.value, hideUnreleased: hideChk.checked };
       if (cfg.range.from && cfg.range.to && cfg.range.from > cfg.range.to) { setStatus('"From" is after "To".', true); return; }
       saveRange();
+      if (!(cfg.apiKey || '').trim()) {
+        // No key: the range still drives the search box; the listing needs TMDB.
+        setStatus(filterActive() ? 'Range saved for the search box. The listing needs a TMDB key.' : '');
+        if (filterActive()) togglePanel(true);
+        return;
+      }
       if (filterActive()) run(1); else restore();
     });
     hideChk.addEventListener('change', () => applyBtn.click());
@@ -542,7 +617,6 @@
     if (!bar) return;
     const hasKey = !!(cfg.apiKey || '').trim();
     hintEl.style.display = hasKey ? 'none' : '';
-    [fromInput, toInput, hideChk, applyBtn].forEach((i) => { i.disabled = !hasKey; });
     if (!hasKey) setStatus('');
   }
   const filterActive = () => effectiveRange().active;
@@ -730,6 +804,112 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * Stream link: Copy m3u8 on the watch page, remembered for the detail  *
+   * page (next to the poster) while the link's token is still fresh.     *
+   * ------------------------------------------------------------------ */
+  const STREAM_TTL_MS = 3 * 60 * 60 * 1000;   // fallback when the URL carries no JWT exp
+  const titleKey = () => {
+    const m = location.pathname.match(/^\/(?:watch\/)?(movie|tv)\/(\d+)/);
+    return m ? m[1] + '-' + m[2] : '';
+  };
+  // Stream hosts hand out IP-bound JWTs; read `exp` so we know when a saved link dies.
+  function streamExpiry(url) {
+    try {
+      const tok = new URL(url).searchParams.get('token') || '';
+      const parts = tok.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+        if (payload && payload.exp) return payload.exp * 1000;
+      }
+    } catch (_) {}
+    return Date.now() + STREAM_TTL_MS;
+  }
+  const streamStore = () => store.get('streams', {});
+  function saveStream(key, url, frame) {
+    if (!key) return;
+    const all = streamStore();
+    all[key] = { url, frame, at: Date.now(), exp: streamExpiry(url) };
+    // keep the store small
+    const keys = Object.keys(all).sort((a, b) => all[b].at - all[a].at).slice(40);
+    keys.forEach((k) => delete all[k]);
+    store.set('streams', all);
+  }
+  function freshStream(key) {
+    const s = streamStore()[key];
+    return s && s.url && s.exp > Date.now() + 60 * 1000 ? s : null;
+  }
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+    try { GM_setClipboard(text, 'text'); return true; } catch (_) {}
+    return false;
+  }
+  function copyButton(getUrl, label) {
+    const b = el('button', { class: 'hdf-btn hdf-primary', type: 'button', text: label || 'Copy m3u8' });
+    b.addEventListener('click', async () => {
+      const u = getUrl(); if (!u) return;
+      const ok = await copyText(u);
+      b.textContent = ok ? 'Copied' : 'Copy failed'; b.classList.toggle('hdf-ok', ok);
+      setTimeout(() => { b.textContent = label || 'Copy m3u8'; b.classList.remove('hdf-ok'); }, 1500);
+    });
+    return b;
+  }
+  const fmtTime = (ms) => { try { return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (_) { return ''; } };
+
+  function installWatchStream() {
+    const frame = qs('#playerFrame');
+    const box = frame && frame.closest('.player-wrap') && frame.closest('.player-wrap').parentElement.querySelector('.bg-glass');
+    if (!frame || !box) return;
+    const key = titleKey();
+    let links = [];              // every m3u8 seen for the current server, first = master
+    const status = el('span', { class: 'hdf-st' });
+    const copy = copyButton(() => links[0] || '');
+    const open = el('a', { class: 'hdf-btn', href: '#', target: '_blank', rel: 'noopener noreferrer', text: 'Open' });
+    const row = el('div', { class: 'hdf-stream' }, el('span', { class: 'hdf-sl', text: 'Stream link' }), status, copy, open);
+    box.insertBefore(row, box.firstChild);
+
+    const render = () => {
+      const u = links[0];
+      copy.style.display = u ? '' : 'none'; open.style.display = u ? '' : 'none';
+      if (!u) { status.textContent = 'Waiting for the player to request its .m3u8 (press play if it has not started).'; return; }
+      status.replaceChildren(el('b', { text: hostOf(u) }), ' ' + (new URL(u).pathname.split('/').pop() || 'playlist') +
+        (links.length > 1 ? ' (+' + (links.length - 1) + ' more)' : '') + ' until ' + fmtTime(streamExpiry(u)));
+      open.href = u;
+    };
+    const reset = () => { links = []; render(); };
+    render();
+
+    window.addEventListener('message', (e) => {
+      const d = e.data;
+      if (!d || d.hdf !== 'm3u8' || typeof d.url !== 'string' || !/^https?:\/\//i.test(d.url) || !M3U8_RX.test(d.url)) return;
+      if (links.includes(d.url)) return;
+      links.push(d.url);
+      if (links.length === 1) saveStream(key, d.url, d.frame || '');
+      render();
+    });
+    // A server switch swaps the iframe src: the old link no longer belongs to what is playing.
+    new MutationObserver(reset).observe(frame, { attributes: true, attributeFilter: ['src'] });
+    W.addEventListener('hashchange', reset);
+  }
+
+  function installDetailStream() {
+    const key = titleKey();
+    if (!key || qs('#playerFrame')) return;
+    // Detail pages have no <main>; the poster is the first TMDB image that is not the hero backdrop, a card or a cast photo.
+    const poster = qsa('.container img, img').find((i) => /image\.tmdb\.org/.test(i.src) && !i.closest('.card, .hero-bg, .scroll-row, .search-modal'));
+    if (!poster) return;
+    const wrap = el('div', { class: 'hdf-poster-btn' });
+    const s = freshStream(key);
+    if (s) {
+      wrap.append(copyButton(() => (freshStream(key) || {}).url || ''), el('small', { text: hostOf(s.url) + ', good until ' + fmtTime(s.exp) }));
+    } else {
+      const watch = qs('a.btn[href*="/watch/"]');
+      wrap.append(el('a', { class: 'hdf-btn', href: watch ? watch.getAttribute('href') : '#', text: 'Get m3u8' }),
+        el('small', { text: 'Play it once on the watch page; the link shows up there and here.' }));
+    }
+    poster.insertAdjacentElement('afterend', wrap);
+  }
+
+  /* ------------------------------------------------------------------ *
    * Boot                                                                 *
    * ------------------------------------------------------------------ */
   function boot() {
@@ -741,6 +921,8 @@
     if (cfg.panel.open) buildPanel();
 
     installSearch();
+    installWatchStream();
+    installDetailStream();
 
     ctx = pageContext();
     if (ctx.listing) {

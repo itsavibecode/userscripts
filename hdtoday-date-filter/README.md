@@ -17,6 +17,23 @@ are not out yet.
 - **Settings panel**: draggable, resizable (bottom-right corner), collapsible
   (the – / + in its header); position, size and state persist. Open it from the
   gear button in the filter bar or the Tampermonkey menu.
+- **Copy m3u8**: on a watch page a **Stream link** row sits above the server
+  buttons. Once the player starts, it shows the host of the `.m3u8` the player
+  is using, with **Copy m3u8** and **Open** buttons. The link is remembered,
+  and the title's detail page shows the same Copy button next to the poster
+  until the link's token runs out (the hosts hand out tokens that last a few
+  hours and only work from your own network).
+
+## How the stream link is found
+
+The player is a chain of cross-origin iframes (site, then an embed host, then
+the stream host), so the page itself never sees the `.m3u8`. The script runs at
+document-start in every frame whose ancestor is the site, hooks `fetch`,
+`XMLHttpRequest` and media `src` there, and posts any `.m3u8` URL to the top
+page. The first one seen for a server is treated as the master playlist; a
+server switch clears it. If a player loads its stream some other way (service
+worker, blob), the row keeps saying "Waiting for the player", which is honest:
+the script did not see a playlist.
 
 ## Why TMDB, and the key
 
@@ -71,16 +88,23 @@ Notes:
 
 ## The domain changes
 
-The site moves domains. The `@match` line at the top of the `.user.js` is the
-only thing tied to the domain:
+The site moves domains. The only thing tied to the domain is the `SITE_HOSTS`
+list just below the header of the `.user.js`:
 
 ```
-// @match        https://hdtodayz.gd/*
+const SITE_HOSTS = ['hdtodayz.gd'];
 ```
 
-When it moves, add another `@match` line for the new domain (Tampermonkey also
-lets you add one under the script's **Settings > Includes/Excludes** without
-editing the file). Everything else is path-based and keeps working.
+When it moves, add the new domain to that list. Everything else is path-based
+and keeps working.
+
+Why the `@match` is `*://*/*` rather than the site: the Copy-m3u8 feature has to
+run inside the player iframes, which live on other domains that change all the
+time. On any page that is neither the site nor one of its player frames the
+script exits in its first few lines, before touching the page. If you would
+rather not have it match everything, change `@match` back to the site's URL
+plus the embed hosts you use; the date filter and search features only need
+the site itself.
 
 ## Install
 
@@ -101,6 +125,19 @@ selectors live near the top of the `.user.js` (`pageContext`, `findGrid`,
 `findPager`, `installSearch`).
 
 ## Changelog
+
+### 0.2.0
+- **Copy m3u8.** Watch pages get a **Stream link** row above the server
+  buttons: once the player starts, it names the stream host and playlist, says
+  when the link's token expires, and offers **Copy m3u8** and **Open**. The
+  link is remembered so the title's detail page shows the same button next to
+  the poster while it is still valid. Found by a document-start sniffer that
+  runs inside the player iframes (they are cross-origin, so the page itself
+  never sees the playlist), which is why `@match` is now `*://*/*` with an
+  early exit everywhere else; the site's domains live in `SITE_HOSTS`.
+- The date fields are no longer greyed out without a TMDB key. The range can
+  always be set (the search box uses it with no key); Apply on a listing page
+  without a key opens the settings panel instead of fetching.
 
 ### 0.1.0
 - Initial release. Date range (from / to) and Hide-unreleased on listing pages,
