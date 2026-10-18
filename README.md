@@ -10,6 +10,7 @@ every day.
 | [kick-autochat](./kick-autochat) | Auto-send a message to a Kick.com chat on a timer without needing window focus, with a draggable GUI, scheduled messages, and a mention watcher. |
 | [kick-chat-cleaner](./kick-chat-cleaner) | Hide emote-only chat messages and collapse duplicate messages (keeping the original) on kick.com. |
 | [kick-gif-clipper](./kick-gif-clipper) | Record (or grab the last 15 s of) a live Kick stream, trim / cut / crop / caption it, and download a GIF or WebM. Runs fully in the browser. |
+| [hdtoday-date-filter](./hdtoday-date-filter) | Filter and sort hdtoday listings and search by full release date (on-or-before / between), with a Hide-unreleased toggle. Listing pages query TMDB with your own free key; the search box needs none. |
 
 ## Installing any script in this repo
 
