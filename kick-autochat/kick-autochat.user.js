@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.39.1
+// @version      0.39.2
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -856,6 +856,7 @@
       .kac-men-item.reply .kac-men-s{color:#9ad4ff}
       .kac-men-item.quote .kac-men-s{color:#ffc266}
       .kac-men-q{color:#6f6f78;font-size:9.5px;padding-left:8px;margin-top:1px}
+      .kac-claim-u{color:#8a8a93;font-size:9.5px;padding-left:8px;margin-top:1px;cursor:help;word-break:break-word}
       #kac-logtab{cursor:pointer;background:none;border:none;color:#9a9aa3;font-size:12px;padding:0 4px}
       #kac-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:move;
         background:linear-gradient(90deg,#1b2f1b,#13131a);border-bottom:1px solid #2a2a30}
@@ -2857,17 +2858,18 @@
       if (last && now - last < repeatMs) continue;        // don't re-claim the same answer
       if (users.size >= settings.triviaThreshold && users.size > bestN) { best = p; bestN = users.size; }
     }
-    if (best) doTriviaClaim(best, bestN, now);
+    if (best) doTriviaClaim(best, bestN, [...byPhrase.get(best)], now);
   }
 
-  function doTriviaClaim(phrase, n, now) {
+  function doTriviaClaim(phrase, n, users, now) {
     const text = (settings.triviaPrefix || '') + phrase;
     if (!sendRaw(text)) return; // target-gated; false when off-target / no input found
     triviaLastClaimAt = now;
     triviaClaimedAt.set(phrase, now);
     while (triviaClaimedAt.size > 50) triviaClaimedAt.delete(triviaClaimedAt.keys().next().value);
-    addClaim({ phrase, n, channel: currentChannel() });
-    log(`Trivia claim: "${phrase}" (${n} people)`);
+    const names = Array.isArray(users) ? users.slice(0, 40) : [];
+    addClaim({ phrase, n, users: names, channel: currentChannel() });
+    log(`Trivia claim: "${phrase}" (${n} people: ${names.slice(0, 6).join(', ')}${names.length > 6 ? ', …' : ''})`);
     if (settings.triviaMaxClaims > 0) {
       triviaClaimsLeft--;
       if (triviaClaimsLeft <= 0) {
@@ -2968,6 +2970,17 @@
     const bEl = document.createElement('span');
     bEl.textContent = rec.phrase || '';
     div.appendChild(bEl);
+    // Who said it — so a copypasta/false grab is auditable (real distinct names
+    // = a genuine consensus that happened not to be a trivia answer).
+    if (Array.isArray(rec.users) && rec.users.length) {
+      const uEl = document.createElement('div');
+      uEl.className = 'kac-claim-u';
+      const shown = rec.users.slice(0, 12);
+      const extra = rec.users.length - shown.length;
+      uEl.textContent = 'by ' + shown.join(', ') + (extra > 0 ? ` +${extra} more` : '');
+      uEl.title = rec.users.join(', ');
+      div.appendChild(uEl);
+    }
     ui.claims.appendChild(div);
     ui.claims.scrollTop = ui.claims.scrollHeight;
     while (ui.claims.childNodes.length > CLAIMS_MAX) ui.claims.removeChild(ui.claims.firstChild);
@@ -2985,7 +2998,7 @@
   }
 
   function addClaim(c) {
-    const rec = { ts: new Date().toISOString(), phrase: c.phrase, n: c.n, channel: c.channel || '' };
+    const rec = { ts: new Date().toISOString(), phrase: c.phrase, n: c.n, channel: c.channel || '', users: Array.isArray(c.users) ? c.users : [] };
     claimLog.push(rec);
     while (claimLog.length > CLAIMS_MAX) claimLog.shift();
     saveClaims();
