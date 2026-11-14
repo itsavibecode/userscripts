@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.38.1
+// @version      0.39.0
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -27,6 +27,8 @@
   // Mentions are kept in their own store so they survive a reload.
   const MEN_KEY = 'kick-autochat:mentions';
   const MEN_MAX = 60;
+  const CLAIMS_KEY = 'kick-autochat:claims'; // trivia-grabber claim history
+  const CLAIMS_MAX = 60;
 
   // Multi-tab remote coordination. The remote server has a single state slot, so
   // if every open Kick tab posted to it they would overwrite each other and the
@@ -83,6 +85,19 @@
     //   { id, message, randomize, intervalSec, intervalMaxSec,
     //     cooldownSec, cooldownMaxSec, antiDup, rotateKeywords, running, collapsed }
     extraSenders: [],
+    // Trivia Grabber — when ARMED, watch chat for a short phrase that many
+    // DISTINCT people are saying at once (the crowd's answer to an on-screen
+    // trivia question) and send it to claim it. The question itself is in the
+    // stream video so we can't read it — we ride the chat consensus instead.
+    // (The armed state is runtime-only and never persists, so a reload never
+    // leaves it grabbing unattended.)
+    triviaMinWords: 2,      // only consider phrases with at least this many words
+    triviaMaxWords: 2,      // ...and at most this many (2 keeps out emote/reaction spam)
+    triviaThreshold: 4,     // distinct people saying the same phrase → it's the answer
+    triviaWindowSec: 20,    // rolling window the distinct-people count is measured over
+    triviaCooldownSec: 30,  // minimum gap between two claims (rolls into the next round)
+    triviaMaxClaims: 0,     // 0 = unlimited (armed until you disarm); N = auto-disarm after N
+    triviaPrefix: '',       // prepended to the phrase when claiming (e.g. "!answer ")
   };
 
   // Your saved settings always win over DEFAULTS: an update never rewrites your
@@ -140,6 +155,18 @@
   let unreadMen = 0;          // unseen mention count (for the badge)
   let menTotal = 0;           // how many mentions are in the list
   let mentionLog = [];        // persisted mention records (see MEN_KEY)
+  // Trivia Grabber runtime (armed state is deliberately NOT persisted — a reload
+  // never re-arms it on its own).
+  let triviaTimer = null;     // 1s poll while armed
+  let triviaArmed = false;
+  let triviaClaimsLeft = 0;   // remaining claims when triviaMaxClaims > 0
+  let triviaLastClaimAt = 0;  // epoch ms of the last claim (cooldown)
+  let triviaWindow = [];      // rolling [{u: senderLower, p: phrase, ts}]
+  const triviaSeen = new Set(); // line signatures already ingested into the window
+  const triviaClaimedAt = new Map(); // phrase → ts last claimed (don't re-claim the same answer)
+  let claimLog = [];          // persisted claim records (see CLAIMS_KEY)
+  let claimTotal = 0;
+  let unreadClaims = 0;       // unseen claims (Claims-tab badge)
   let logLines = [];          // in-memory copy of the activity log, mirrored to the remote
   let remoteTimer = null;     // heartbeat to the local remote server
   let remoteOk = null;        // last sync result: true | false | null (never tried)
@@ -1079,6 +1106,15 @@
         <div id="kac-watch-status"
           title="Whether the mention watcher is active, and how many mentions it has caught this session."></div>
         <div class="kac-div"></div>
+        <div class="kac-inline">
+          <label class="kac-inline-lbl"
+            title="Trivia Grabber: while ARMED, it watches chat for a short phrase that several different people say at once — the crowd answering the on-screen trivia — and sends it to claim it. Can't read the question itself (it's in the video), so it rides the chat consensus. Tune words/threshold/window in the Settings (gear) tab. Only grabs on the Target channel.">Trivia grabber <span class="kac-q">?</span></label>
+          <button class="kac-btn kac-btn-w" id="kac-trivia-btn"
+            title="Arm / disarm the trivia grabber. While armed it sends a 2-word phrase the moment enough different people say it. Set a claim limit in Settings, or leave it unlimited and disarm when the game's over. Each claim is saved to the Claims tab.">Arm trivia</button>
+        </div>
+        <div id="kac-trivia-status"
+          title="Whether the grabber is armed, and how many answers it has claimed this session."></div>
+        <div class="kac-div"></div>
         <div class="kac-btns">
           <button class="kac-btn" id="kac-toggle"
             title="Start / Stop the auto-sender. While running, messages send on the Interval/Cooldown timer even if this tab is in the background (no window focus needed).">Start</button>
@@ -1107,14 +1143,17 @@
         <div id="kac-drawer-head">
           <button id="kac-tab-log" class="kac-tab active" title="Activity log: sends, start/stop, and errors.">Log</button>
           <button id="kac-tab-men" class="kac-tab" title="Mentions: messages that @ you or reply to you (needs the watcher enabled below). Saved locally, so they survive a browser reload — use Clear to wipe them.">Mentions <span id="kac-men-badge" class="kac-badge">0</span></button>
-          <button id="kac-tab-set" class="kac-tab" title="Settings: mention-watcher ignore list, sound, and webhook options.">⚙</button>
-          <button id="kac-clear" title="Clear the list shown in the current tab (Log or Mentions).">Clear</button>
+          <button id="kac-tab-claims" class="kac-tab" title="Claims: every trivia answer the grabber has sent, with how many people were saying it and when. Saved locally; Clear wipes them.">Claims <span id="kac-claims-badge" class="kac-badge">0</span></button>
+          <button id="kac-tab-set" class="kac-tab" title="Settings: mention-watcher ignore list, sound, webhook, remote, and trivia-grabber options.">⚙</button>
+          <button id="kac-clear" title="Clear the list shown in the current tab (Log, Mentions, or Claims).">Clear</button>
         </div>
         <div id="kac-drawer-body">
         <div id="kac-log"
           title="Activity log: timestamped record of sends, start/stop, and any errors (e.g. 'Chat input not found'). Keeps the last ~40 lines. Toggle it with the arrow in the title bar."></div>
         <div id="kac-mentions" style="display:none"
           title="@mentions and replies to your username, captured from chat. Read-only — the script never replies. Saved locally, so they come back after a browser reload; Clear wipes them."></div>
+        <div id="kac-claims" style="display:none"
+          title="Every trivia answer the grabber has sent: when, which channel, how many different people were saying it, and the phrase. Saved locally; Clear wipes them."></div>
         <div id="kac-settings" style="display:none">
           <div class="kac-set-h">MENTION WATCHER</div>
           <div class="kac-row">
@@ -1177,6 +1216,50 @@
           <label class="kac-check"
             title="Watch the $CHAT (Chat Hype Index) ticker on shoovy.wtf/stocks and alert (log + beep + optional webhook) whenever it prints a new 24-hour low. ONLY active when the Target channel is 'shoovy' AND the remote server (the .bat) is running — the shoovy.wtf API sends no CORS header, so the browser can't read it directly; the local server polls it and pushes the alert here.">
             <input type="checkbox" id="kac-chat-en" /> Alert on new $CHAT 24h lows</label>
+          <div class="kac-div"></div>
+          <div class="kac-set-h"
+            title="Tuning for the Trivia grabber (armed from the main panel). It watches chat for a short phrase that this many different people say within the window, then sends it.">TRIVIA GRABBER</div>
+          <div class="kac-grid">
+            <div class="kac-row">
+              <label title="Shortest phrase (in words) to consider an answer. 2 is a good default — it skips one-word emote/reaction spam.">Min words <span class="kac-q">?</span></label>
+              <input type="number" id="kac-trivia-min" min="1" max="6" step="1"
+                title="Fewest words a phrase must have to count as a possible answer. 2 recommended." />
+            </div>
+            <div class="kac-row">
+              <label title="Longest phrase (in words) to consider. Keep equal to Min for exact-length matching; widen if answers vary.">Max words <span class="kac-q">?</span></label>
+              <input type="number" id="kac-trivia-max" min="1" max="6" step="1"
+                title="Most words a phrase can have and still count. Equal to Min = exact length." />
+            </div>
+          </div>
+          <div class="kac-grid">
+            <div class="kac-row">
+              <label title="How many DIFFERENT people must be saying the same phrase before it's sent. Higher = stricter (fewer false fires), lower = faster to claim.">People <span class="kac-q">?</span></label>
+              <input type="number" id="kac-trivia-thresh" min="2" max="50" step="1"
+                title="Distinct people saying the same phrase needed to trigger a claim. 4 default; raise to 5–6 if it's twitchy." />
+            </div>
+            <div class="kac-row">
+              <label title="Seconds of recent chat the people-count is measured over.">Window (s) <span class="kac-q">?</span></label>
+              <input type="number" id="kac-trivia-window" min="3" max="120" step="1"
+                title="Rolling window (seconds) the distinct-people count looks back over. 20 default." />
+            </div>
+          </div>
+          <div class="kac-grid">
+            <div class="kac-row">
+              <label title="Minimum seconds between two claims, so it rolls cleanly into the next question instead of re-firing the last answer.">Cooldown (s) <span class="kac-q">?</span></label>
+              <input type="number" id="kac-trivia-cool" min="0" max="600" step="1"
+                title="Minimum gap between claims, in seconds. 30 default." />
+            </div>
+            <div class="kac-row">
+              <label title="Stop after this many claims and auto-disarm. 0 = unlimited (stays armed until you disarm).">Max claims <span class="kac-q">?</span></label>
+              <input type="number" id="kac-trivia-maxclaims" min="0" max="999" step="1"
+                title="Auto-disarm after this many claims. 0 = unlimited." />
+            </div>
+          </div>
+          <div class="kac-row">
+            <label title="Text put in front of the phrase when claiming. Leave blank to type the words plainly; set to e.g. '!answer ' if that stream's trivia needs a command.">Claim prefix (optional) <span class="kac-q">?</span></label>
+            <input type="text" id="kac-trivia-prefix" placeholder="(blank = send the words as-is)"
+              title="Prepended to the claimed phrase. Blank sends the words plainly. Example: !answer " />
+          </div>
           <div class="kac-div"></div>
           <div class="kac-set-h">BACKUP</div>
           <div class="kac-btns">
@@ -1244,13 +1327,25 @@
       remPort: p.querySelector('#kac-rem-port'),
       remStatus: p.querySelector('#kac-rem-status'),
       chatEn: p.querySelector('#kac-chat-en'),
+      triviaBtn: p.querySelector('#kac-trivia-btn'),
+      triviaStatus: p.querySelector('#kac-trivia-status'),
+      triviaMin: p.querySelector('#kac-trivia-min'),
+      triviaMax: p.querySelector('#kac-trivia-max'),
+      triviaThresh: p.querySelector('#kac-trivia-thresh'),
+      triviaWindow: p.querySelector('#kac-trivia-window'),
+      triviaCool: p.querySelector('#kac-trivia-cool'),
+      triviaMaxClaims: p.querySelector('#kac-trivia-maxclaims'),
+      triviaPrefix: p.querySelector('#kac-trivia-prefix'),
       tabLog: p.querySelector('#kac-tab-log'),
       tabMen: p.querySelector('#kac-tab-men'),
+      tabClaims: p.querySelector('#kac-tab-claims'),
       tabSet: p.querySelector('#kac-tab-set'),
       settingsPane: p.querySelector('#kac-settings'),
       clear: p.querySelector('#kac-clear'),
       menBadge: p.querySelector('#kac-men-badge'),
+      claimsBadge: p.querySelector('#kac-claims-badge'),
       mentions: p.querySelector('#kac-mentions'),
+      claims: p.querySelector('#kac-claims'),
       toggle: p.querySelector('#kac-toggle'),
       now: p.querySelector('#kac-now'),
       status: p.querySelector('#kac-status'),
@@ -1272,6 +1367,7 @@
 
     applySettingsToUI();
     restoreMentions();
+    restoreClaims();
     setTab('log');
 
     // Wire events
@@ -1384,6 +1480,38 @@
       saveSettings();
       updateExplain();
     });
+    // ---- Trivia grabber ----
+    ui.triviaBtn.addEventListener('click', toggleTrivia);
+    const clampInt = (el, lo, hi, dflt) => Math.max(lo, Math.min(hi, parseInt(el.value, 10) || dflt));
+    ui.triviaMin.addEventListener('input', () => {
+      settings.triviaMinWords = clampInt(ui.triviaMin, 1, 6, 2);
+      if (settings.triviaMaxWords < settings.triviaMinWords) {
+        settings.triviaMaxWords = settings.triviaMinWords;
+        ui.triviaMax.value = settings.triviaMaxWords;
+      }
+      saveSettings(); updateTriviaStatus();
+    });
+    ui.triviaMax.addEventListener('input', () => {
+      settings.triviaMaxWords = clampInt(ui.triviaMax, 1, 6, 2);
+      if (settings.triviaMaxWords < settings.triviaMinWords) {
+        settings.triviaMinWords = settings.triviaMaxWords;
+        ui.triviaMin.value = settings.triviaMinWords;
+      }
+      saveSettings(); updateTriviaStatus();
+    });
+    ui.triviaThresh.addEventListener('input', () => {
+      settings.triviaThreshold = clampInt(ui.triviaThresh, 2, 50, 4); saveSettings(); updateTriviaStatus();
+    });
+    ui.triviaWindow.addEventListener('input', () => {
+      settings.triviaWindowSec = clampInt(ui.triviaWindow, 3, 120, 20); saveSettings(); updateTriviaStatus();
+    });
+    ui.triviaCool.addEventListener('input', () => {
+      settings.triviaCooldownSec = clampInt(ui.triviaCool, 0, 600, 30); saveSettings();
+    });
+    ui.triviaMaxClaims.addEventListener('input', () => {
+      settings.triviaMaxClaims = clampInt(ui.triviaMaxClaims, 0, 999, 0); saveSettings(); updateTriviaStatus();
+    });
+    ui.triviaPrefix.addEventListener('input', () => { settings.triviaPrefix = ui.triviaPrefix.value; saveSettings(); });
     ui.whTest.addEventListener('click', () => {
       if (!(settings.webhookUrl || '').trim()) { log('Webhook: paste a URL first.', true); return; }
       setTab('log'); // the result lands in the log — show it
@@ -1404,6 +1532,7 @@
     });
     ui.tabLog.addEventListener('click', () => setTab('log'));
     ui.tabMen.addEventListener('click', () => setTab('men'));
+    ui.tabClaims.addEventListener('click', () => setTab('claims'));
     ui.tabSet.addEventListener('click', () => setTab('set'));
     ui.clear.addEventListener('click', () => {
       if (activeTab === 'men') {
@@ -1417,6 +1546,15 @@
         unreadMen = 0;
         updateMenBadge();
         updateWatchStatus();
+      } else if (activeTab === 'claims') {
+        // Clears the display AND the saved claim history. triviaClaimedAt stays so
+        // an armed round still won't re-send a phrase it just claimed.
+        ui.claims.textContent = '';
+        claimLog = [];
+        saveClaims();
+        claimTotal = 0;
+        unreadClaims = 0;
+        updateClaimsBadge();
       } else {
         ui.log.textContent = '';
       }
@@ -1521,9 +1659,18 @@
     ui.remPort.value = settings.remotePort;
     ui.remWrap.classList.toggle('hidden', !settings.remoteEnabled);
     ui.chatEn.checked = settings.chatMonitor;
+    ui.triviaMin.value = settings.triviaMinWords;
+    ui.triviaMax.value = settings.triviaMaxWords;
+    ui.triviaThresh.value = settings.triviaThreshold;
+    ui.triviaWindow.value = settings.triviaWindowSec;
+    ui.triviaCool.value = settings.triviaCooldownSec;
+    ui.triviaMaxClaims.value = settings.triviaMaxClaims;
+    ui.triviaPrefix.value = settings.triviaPrefix;
     updateRemoteStatus();
     syncWatchControls();
+    syncTriviaControls();
     updateMenBadge();
+    updateClaimsBadge();
     updateExplain();
     applyExplain();
     if (settings.pos.left != null) {
@@ -2045,13 +2192,16 @@
     activeTab = tab;
     if (ui.log) ui.log.style.display = tab === 'log' ? '' : 'none';
     if (ui.mentions) ui.mentions.style.display = tab === 'men' ? '' : 'none';
+    if (ui.claims) ui.claims.style.display = tab === 'claims' ? '' : 'none';
     if (ui.settingsPane) ui.settingsPane.style.display = tab === 'set' ? '' : 'none';
     if (ui.tabLog) ui.tabLog.classList.toggle('active', tab === 'log');
     if (ui.tabMen) ui.tabMen.classList.toggle('active', tab === 'men');
+    if (ui.tabClaims) ui.tabClaims.classList.toggle('active', tab === 'claims');
     if (ui.tabSet) ui.tabSet.classList.toggle('active', tab === 'set');
-    // Clear only applies to the two list tabs.
+    // Clear applies to the list tabs (not the settings form).
     if (ui.clear) ui.clear.style.display = tab === 'set' ? 'none' : '';
     if (tab === 'men') { unreadMen = 0; updateMenBadge(); }
+    if (tab === 'claims') { unreadClaims = 0; updateClaimsBadge(); }
   }
 
   function updateMenBadge() {
@@ -2601,6 +2751,239 @@
   function applyWatcher() {
     if (settings.watchEnabled && watchName()) startWatcher();
     else stopWatcher();
+  }
+
+  // ----------------------------------------------------------------------
+  // Trivia Grabber — while armed, watch chat for a short phrase said by many
+  // distinct people at once (the crowd answering an on-screen trivia question)
+  // and send it. We can't read the question (it's in the stream video), so we
+  // ride the consensus. The 2-word default keeps out one-word emote/reaction
+  // spam; distinct-user counting stops one person spamming from triggering it.
+  // ----------------------------------------------------------------------
+  let triviaSeeded = false; // on arm, mark the backlog seen so it isn't counted
+
+  // Normalise a message to a comparable phrase: drop :emote: tokens, keep
+  // letters/numbers/space/'/-, lowercase, collapse whitespace.
+  function normTriviaPhrase(body) {
+    let s = (body || '').toLowerCase();
+    s = s.replace(/:[a-z0-9_]+:/g, ' ');
+    try { s = s.replace(/[^\p{L}\p{N}\s'-]/gu, ' '); }
+    catch (e) { s = s.replace(/[^a-z0-9\s'-]/g, ' '); } // fallback if \p unsupported
+    return s.replace(/\s+/g, ' ').trim();
+  }
+
+  function triviaWordCount(norm) {
+    return norm ? norm.split(' ').filter(Boolean).length : 0;
+  }
+
+  function isTriviaCandidate(norm) {
+    if (!norm) return false;
+    if (/https?:\/\/|www\.|@/.test(norm)) return false; // links / @mentions aren't answers
+    const w = triviaWordCount(norm);
+    return w >= settings.triviaMinWords && w <= settings.triviaMaxWords;
+  }
+
+  function scanTrivia() {
+    if (!triviaArmed) return;
+    // Only grab on the channel you're claiming for.
+    if (!isOnTarget()) { updateTriviaStatus(); return; }
+    const lines = chatLines();
+    if (!lines.length) return;
+
+    if (!triviaSeeded) {
+      // Mark everything already on screen as seen so the existing backlog isn't
+      // mistaken for a fresh consensus the instant you arm.
+      for (const { el } of lines) triviaSeen.add(lineSig(el));
+      triviaSeeded = true;
+      updateTriviaStatus();
+      return;
+    }
+
+    const now = Date.now();
+    const windowMs = Math.max(3, settings.triviaWindowSec) * 1000;
+    triviaWindow = triviaWindow.filter((e) => now - e.ts <= windowMs);
+
+    for (const { el } of lines) {
+      const sig = lineSig(el);
+      if (triviaSeen.has(sig)) continue;
+      triviaSeen.add(sig);
+      while (triviaSeen.size > 500) triviaSeen.delete(triviaSeen.values().next().value);
+      const sender = extractSender(el);
+      if (!sender) continue;
+      if (isIgnoredSender(sender)) continue;              // bots don't count toward consensus
+      const me = watchName();
+      if (me && sender.toLowerCase() === me.toLowerCase()) continue; // skip your own lines
+      const norm = normTriviaPhrase(extractBody(el));
+      if (!isTriviaCandidate(norm)) continue;
+      triviaWindow.push({ u: sender.toLowerCase(), p: norm, ts: now });
+    }
+
+    maybeTriviaClaim(now);
+    updateTriviaStatus();
+  }
+
+  function maybeTriviaClaim(now) {
+    if (now - triviaLastClaimAt < Math.max(0, settings.triviaCooldownSec) * 1000) return;
+    const byPhrase = new Map(); // phrase → Set(distinct users)
+    for (const e of triviaWindow) {
+      let set = byPhrase.get(e.p);
+      if (!set) { set = new Set(); byPhrase.set(e.p, set); }
+      set.add(e.u);
+    }
+    const repeatMs = Math.max(settings.triviaWindowSec * 1000, 60000);
+    let best = null, bestN = 0;
+    for (const [p, users] of byPhrase) {
+      const last = triviaClaimedAt.get(p);
+      if (last && now - last < repeatMs) continue;        // don't re-claim the same answer
+      if (users.size >= settings.triviaThreshold && users.size > bestN) { best = p; bestN = users.size; }
+    }
+    if (best) doTriviaClaim(best, bestN, now);
+  }
+
+  function doTriviaClaim(phrase, n, now) {
+    const text = (settings.triviaPrefix || '') + phrase;
+    if (!sendRaw(text)) return; // target-gated; false when off-target / no input found
+    triviaLastClaimAt = now;
+    triviaClaimedAt.set(phrase, now);
+    while (triviaClaimedAt.size > 50) triviaClaimedAt.delete(triviaClaimedAt.keys().next().value);
+    addClaim({ phrase, n, channel: currentChannel() });
+    log(`Trivia claim: "${phrase}" (${n} people)`);
+    if (settings.triviaMaxClaims > 0) {
+      triviaClaimsLeft--;
+      if (triviaClaimsLeft <= 0) {
+        stopTrivia();
+        log('Trivia: reached max claims — disarmed.');
+        return;
+      }
+    }
+    syncTriviaControls();
+  }
+
+  function startTrivia() {
+    if (triviaTimer) { triviaArmed = true; return; }
+    triviaArmed = true;
+    triviaSeeded = false;
+    triviaWindow = [];
+    triviaSeen.clear();
+    triviaClaimsLeft = settings.triviaMaxClaims > 0 ? settings.triviaMaxClaims : 0;
+    triviaTimer = setInterval(scanTrivia, 1000);
+    log(settings.triviaMaxClaims > 0
+      ? `Trivia armed — will claim up to ${settings.triviaMaxClaims}, then disarm.`
+      : 'Trivia armed — will claim until you disarm.');
+    syncTriviaControls();
+    scanTrivia();
+  }
+
+  function stopTrivia() {
+    triviaArmed = false;
+    if (triviaTimer) { clearInterval(triviaTimer); triviaTimer = null; }
+    triviaWindow = [];
+    triviaSeen.clear();
+    syncTriviaControls();
+  }
+
+  function toggleTrivia() {
+    if (triviaArmed) { stopTrivia(); log('Trivia disarmed.'); return; }
+    if (!isOnTarget()) {
+      log(`Trivia: this tab is @${currentChannel() || '—'}, not the target @${targetChannel() || '?'} — it only grabs on the target channel.`);
+    }
+    startTrivia();
+  }
+
+  function syncTriviaControls() {
+    if (ui.triviaBtn) {
+      ui.triviaBtn.textContent = triviaArmed ? 'Disarm trivia' : 'Arm trivia';
+      ui.triviaBtn.classList.toggle('watching', triviaArmed); // reuse the red active style
+    }
+    updateTriviaStatus();
+  }
+
+  function updateTriviaStatus() {
+    if (!ui.triviaStatus) return;
+    const claims = `${claimTotal} claim${claimTotal === 1 ? '' : 's'}`;
+    if (!triviaArmed) { ui.triviaStatus.textContent = `Disarmed · ${claims}`; return; }
+    if (!isOnTarget()) {
+      ui.triviaStatus.innerHTML = `Armed — idle here (@${currentChannel() || '—'}); grabs only on <b>@${targetChannel() || '?'}</b> · ${claims}`;
+      return;
+    }
+    const span = settings.triviaMaxWords !== settings.triviaMinWords
+      ? `${settings.triviaMinWords}–${settings.triviaMaxWords}` : `${settings.triviaMinWords}`;
+    const left = settings.triviaMaxClaims > 0 ? ` · ${triviaClaimsLeft} left` : '';
+    ui.triviaStatus.innerHTML = `Armed — listening for ${settings.triviaThreshold}+ people on a ${span}-word phrase${left} · ${claims}`;
+  }
+
+  // ---- Claims history (persisted, mirrors the Mentions store) ----
+  function loadClaims() {
+    try {
+      const raw = localStorage.getItem(CLAIMS_KEY);
+      if (!raw) return [];
+      const a = JSON.parse(raw);
+      return Array.isArray(a) ? a.slice(-CLAIMS_MAX) : [];
+    } catch (e) { return []; }
+  }
+
+  function saveClaims() {
+    try { localStorage.setItem(CLAIMS_KEY, JSON.stringify(claimLog.slice(-CLAIMS_MAX))); }
+    catch (e) { /* ignore quota errors */ }
+  }
+
+  function renderClaim(rec) {
+    if (!ui.claims) return;
+    const div = document.createElement('div');
+    div.className = 'kac-men-item';
+    const tEl = document.createElement('span');
+    tEl.className = 'kac-men-t';
+    tEl.textContent = `[${stampLocal(new Date(rec.ts))}] `;
+    div.appendChild(tEl);
+    if (rec.channel) {
+      const cEl = document.createElement('span');
+      cEl.className = 'kac-men-c';
+      cEl.textContent = `[${rec.channel}] `;
+      div.appendChild(cEl);
+    }
+    const nEl = document.createElement('span');
+    nEl.className = 'kac-men-s';
+    nEl.textContent = `${rec.n}× `;
+    div.appendChild(nEl);
+    const bEl = document.createElement('span');
+    bEl.textContent = rec.phrase || '';
+    div.appendChild(bEl);
+    ui.claims.appendChild(div);
+    ui.claims.scrollTop = ui.claims.scrollHeight;
+    while (ui.claims.childNodes.length > CLAIMS_MAX) ui.claims.removeChild(ui.claims.firstChild);
+  }
+
+  function restoreClaims() {
+    if (!ui.claims) return;
+    claimLog = loadClaims();
+    ui.claims.textContent = '';
+    for (const rec of claimLog) renderClaim(rec);
+    claimTotal = claimLog.length;
+    unreadClaims = 0;
+    updateClaimsBadge();
+    updateTriviaStatus();
+  }
+
+  function addClaim(c) {
+    const rec = { ts: new Date().toISOString(), phrase: c.phrase, n: c.n, channel: c.channel || '' };
+    claimLog.push(rec);
+    while (claimLog.length > CLAIMS_MAX) claimLog.shift();
+    saveClaims();
+    renderClaim(rec);
+    claimTotal = claimLog.length;
+    if (activeTab !== 'claims') { unreadClaims++; updateClaimsBadge(); }
+    if (settings.watchSound) beep();
+    updateTriviaStatus();
+  }
+
+  function updateClaimsBadge() {
+    if (!ui.claimsBadge) return;
+    if (unreadClaims > 0) {
+      ui.claimsBadge.textContent = unreadClaims > 99 ? '99+' : String(unreadClaims);
+      ui.claimsBadge.style.display = '';
+    } else {
+      ui.claimsBadge.style.display = 'none';
+    }
   }
 
   // ----------------------------------------------------------------------
