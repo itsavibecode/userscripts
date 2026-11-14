@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kick Auto-Chat (iceposeidon)
 // @namespace    https://github.com/itsavibecode/userscripts
-// @version      0.39.0
+// @version      0.39.1
 // @description  Auto-send a message to a Kick.com chat on a timer without needing window focus. Draggable GUI to change the message, interval, and cooldown.
 // @author       itsavibecode
 // @match        https://kick.com/iceposeidon*
@@ -919,6 +919,13 @@
       .kac-inline .kac-inat{flex:1 1 auto;min-width:0;max-width:240px}
       .kac-inline-lbl{flex:0 0 auto;display:flex;align-items:center;gap:4px;
         color:#9a9aa3;font-size:11px;cursor:help;white-space:nowrap}
+      .kac-thr{gap:4px}
+      .kac-thr input[type=number]{flex:0 0 42px;width:42px;box-sizing:border-box;
+        background:#17171c;border:1px solid #2a2a30;color:#e7e7ea;border-radius:5px;
+        padding:4px 2px;font:inherit;font-size:11px;text-align:center;cursor:text;
+        appearance:textfield;-moz-appearance:textfield}
+      .kac-thr input[type=number]::-webkit-inner-spin-button,
+      .kac-thr input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
       .kac-btns{display:flex;gap:8px;margin-top:2px}
       /* flex:1 only makes sense inside .kac-btns (a row). A .kac-btn placed
          directly in the body (a COLUMN) would grow to fill all leftover height. */
@@ -1106,11 +1113,15 @@
         <div id="kac-watch-status"
           title="Whether the mention watcher is active, and how many mentions it has caught this session."></div>
         <div class="kac-div"></div>
-        <div class="kac-inline">
+        <div class="kac-inline" style="flex-wrap:wrap">
           <label class="kac-inline-lbl"
-            title="Trivia Grabber: while ARMED, it watches chat for a short phrase that several different people say at once — the crowd answering the on-screen trivia — and sends it to claim it. Can't read the question itself (it's in the video), so it rides the chat consensus. Tune words/threshold/window in the Settings (gear) tab. Only grabs on the Target channel.">Trivia grabber <span class="kac-q">?</span></label>
+            title="Trivia Grabber: while ARMED, it watches chat for a short phrase that several different people say at once — the crowd answering the on-screen trivia — and sends it to claim it. Can't read the question itself (it's in the video), so it rides the chat consensus. Tune words/window/cooldown in the Settings (gear) tab. Only grabs on the Target channel.">Trivia grabber <span class="kac-q">?</span></label>
           <button class="kac-btn kac-btn-w" id="kac-trivia-btn"
-            title="Arm / disarm the trivia grabber. While armed it sends a 2-word phrase the moment enough different people say it. Set a claim limit in Settings, or leave it unlimited and disarm when the game's over. Each claim is saved to the Claims tab.">Arm trivia</button>
+            title="Arm / disarm the trivia grabber. While armed it sends a short phrase the moment enough different people say it. Set a claim limit in Settings, or leave it unlimited and disarm when the game's over. Each claim is saved to the Claims tab.">Arm trivia</button>
+          <label class="kac-inline-lbl kac-thr"
+            title="Sensitivity — how many DIFFERENT people must say the same phrase before the grabber sends it. Higher is stricter (fewer accidental grabs); lower is more eager. Same value as the 'People' field in the gear tab — changing one updates the other. You can change it while armed.">needs
+            <input type="number" id="kac-trivia-thresh-inline" min="2" max="50" step="1" />
+            people</label>
         </div>
         <div id="kac-trivia-status"
           title="Whether the grabber is armed, and how many answers it has claimed this session."></div>
@@ -1332,6 +1343,7 @@
       triviaMin: p.querySelector('#kac-trivia-min'),
       triviaMax: p.querySelector('#kac-trivia-max'),
       triviaThresh: p.querySelector('#kac-trivia-thresh'),
+      triviaThreshInline: p.querySelector('#kac-trivia-thresh-inline'),
       triviaWindow: p.querySelector('#kac-trivia-window'),
       triviaCool: p.querySelector('#kac-trivia-cool'),
       triviaMaxClaims: p.querySelector('#kac-trivia-maxclaims'),
@@ -1499,9 +1511,16 @@
       }
       saveSettings(); updateTriviaStatus();
     });
-    ui.triviaThresh.addEventListener('input', () => {
-      settings.triviaThreshold = clampInt(ui.triviaThresh, 2, 50, 4); saveSettings(); updateTriviaStatus();
-    });
+    // Threshold lives in two places (gear tab + inline by the Arm button); keep
+    // both boxes showing the same number and write once.
+    const setTriviaThreshold = (fromEl) => {
+      settings.triviaThreshold = clampInt(fromEl, 2, 50, 4);
+      if (ui.triviaThresh && ui.triviaThresh !== fromEl) ui.triviaThresh.value = settings.triviaThreshold;
+      if (ui.triviaThreshInline && ui.triviaThreshInline !== fromEl) ui.triviaThreshInline.value = settings.triviaThreshold;
+      saveSettings(); updateTriviaStatus();
+    };
+    ui.triviaThresh.addEventListener('input', () => setTriviaThreshold(ui.triviaThresh));
+    if (ui.triviaThreshInline) ui.triviaThreshInline.addEventListener('input', () => setTriviaThreshold(ui.triviaThreshInline));
     ui.triviaWindow.addEventListener('input', () => {
       settings.triviaWindowSec = clampInt(ui.triviaWindow, 3, 120, 20); saveSettings(); updateTriviaStatus();
     });
@@ -1662,6 +1681,7 @@
     ui.triviaMin.value = settings.triviaMinWords;
     ui.triviaMax.value = settings.triviaMaxWords;
     ui.triviaThresh.value = settings.triviaThreshold;
+    if (ui.triviaThreshInline) ui.triviaThreshInline.value = settings.triviaThreshold;
     ui.triviaWindow.value = settings.triviaWindowSec;
     ui.triviaCool.value = settings.triviaCooldownSec;
     ui.triviaMaxClaims.value = settings.triviaMaxClaims;
